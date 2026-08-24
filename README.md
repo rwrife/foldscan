@@ -2,6 +2,8 @@
 
 **FoldScan is a USB-powered, foldable ESP32-S3 document-capture stand that stores evenly illuminated page photos offline and turns them into searchable PDFs through a private local desktop app.**
 
+![FoldScan Concept Render](docs/foldscan_isolated_concept.jpg)
+
 ## Overview
 
 FoldScan is an open-hardware path from paper to portable files without a cloud scanner account. A camera head folds over an A4/US-Letter work area, controllable LEDs reduce shadows, and a physical button captures pages to removable storage. A local Windows/macOS/Linux companion imports captures, corrects perspective and lighting, optionally runs offline OCR, organizes multi-page sessions, and exports images or PDF/PDF-A candidates.
