@@ -20,7 +20,7 @@ class ManifestValidationTests(unittest.TestCase):
 
     def _valid_manifest(self) -> dict:
         raw = self.root / "raw"
-        raw.mkdir()
+        raw.mkdir(exist_ok=True)
         captures = []
         minimums = {
             "symmetric-matte": 30,
@@ -123,6 +123,10 @@ class ManifestValidationTests(unittest.TestCase):
         path.write_text(json.dumps(data), encoding="utf-8")
         return path
 
+    def _template_manifest(self) -> dict:
+        template_path = Path(__file__).with_name("manifest.example.json")
+        return json.loads(template_path.read_text(encoding="utf-8"))
+
     def test_valid_manifest_verifies_all_files(self) -> None:
         path = self._write(self._valid_manifest())
         result = validate_manifest(path)
@@ -147,22 +151,113 @@ class ManifestValidationTests(unittest.TestCase):
             validate_manifest(self._write(data))
 
     def test_template_requires_explicit_flag(self) -> None:
-        template = {
-            "schema_version": "1.0",
-            "template": True,
-            "evidence_category": "template-not-run",
-            "captures": [],
-        }
+        template = self._template_manifest()
         path = self._write(template)
         with self.assertRaisesRegex(ValidationError, "not bench evidence"):
             validate_manifest(path)
         self.assertEqual(validate_manifest(path, allow_template=True)["kind"], "template")
+
+    def test_template_requires_complete_manifest_shape(self) -> None:
+        template = self._template_manifest()
+        del template["device"]
+        with self.assertRaisesRegex(ValidationError, "device"):
+            validate_manifest(self._write(template), allow_template=True)
 
     def test_path_escape_fails_before_file_access(self) -> None:
         data = self._valid_manifest()
         data["captures"][0]["path"] = "../private.jpg"
         with self.assertRaisesRegex(ValidationError, "stay beneath"):
             validate_manifest(self._write(data))
+
+    def test_zero_duration_does_not_count_as_bench_measurement(self) -> None:
+        data = self._valid_manifest()
+        data["power_and_thermal"]["test_duration_minutes"] = 0
+        with self.assertRaisesRegex(ValidationError, "test_duration_minutes"):
+            validate_manifest(self._write(data))
+
+    def test_required_measurements_must_be_positive(self) -> None:
+        fields = (
+            ("fixture", "camera_height_mm"),
+            ("fixture", "arm_span_mm"),
+            ("fixture", "base_width_mm"),
+            ("fixture", "base_depth_mm"),
+            ("fixture", "camera_head_mass_g"),
+            ("capture", "latency_to_durable_file_ms"),
+            ("capture", "center_px_per_mm"),
+            ("capture", "top_left_px_per_mm"),
+            ("capture", "top_right_px_per_mm"),
+            ("capture", "bottom_left_px_per_mm"),
+            ("capture", "bottom_right_px_per_mm"),
+            ("power_and_thermal", "idle_current_ma"),
+            ("power_and_thermal", "capture_peak_current_ma"),
+            ("power_and_thermal", "sd_write_peak_current_ma"),
+            ("power_and_thermal", "usb_transfer_peak_current_ma"),
+            ("power_and_thermal", "illumination_current_ma"),
+            ("power_and_thermal", "combined_peak_current_ma"),
+            ("power_and_thermal", "current_sample_rate_hz"),
+        )
+        for section, field in fields:
+            with self.subTest(section=section, field=field):
+                data = self._valid_manifest()
+                target = data["captures"][0] if section == "capture" else data[section]
+                target[field] = 0
+                with self.assertRaisesRegex(ValidationError, field):
+                    validate_manifest(self._write(data))
+
+    def test_bounded_measurements_reject_values_above_their_maximum(self) -> None:
+        cases = (
+            ("relative_humidity_percent", 100.1),
+            ("saturated_pixel_fraction", 1.01),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                data = self._valid_manifest()
+                target = data["fixture"] if field == "relative_humidity_percent" else data["captures"][0]
+                target[field] = value
+                with self.assertRaisesRegex(ValidationError, field):
+                    validate_manifest(self._write(data))
+
+    def test_usable_crop_cannot_exceed_source_dimensions(self) -> None:
+        cases = (
+            ("usable_width_px", "width_px"),
+            ("usable_height_px", "height_px"),
+        )
+        for usable_field, source_field in cases:
+            with self.subTest(field=usable_field):
+                data = self._valid_manifest()
+                capture = data["captures"][0]
+                capture[usable_field] = capture[source_field] + 1
+                with self.assertRaisesRegex(ValidationError, usable_field):
+                    validate_manifest(self._write(data))
+
+    def test_provenance_identifiers_require_canonical_formats(self) -> None:
+        cases = (
+            ("captured_at_utc", "yesterday"),
+            ("captured_at_utc", "2026-8-4T1:2:3Z"),
+            ("captured_at_utc", "2026-08-24T12:00:00z"),
+            ("firmware_commit", "main"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                data = self._valid_manifest()
+                target = data if field == "captured_at_utc" else data["device"]
+                target[field] = value
+                with self.assertRaisesRegex(ValidationError, field):
+                    validate_manifest(self._write(data))
+
+    def test_combined_peak_cannot_be_lower_than_constituent_peaks(self) -> None:
+        data = self._valid_manifest()
+        data["power_and_thermal"]["combined_peak_current_ma"] = 100
+        with self.assertRaisesRegex(ValidationError, "combined_peak_current_ma"):
+            validate_manifest(self._write(data))
+
+    def test_count_and_pixel_fields_require_integers(self) -> None:
+        for field in ("bytes", "width_px", "height_px", "usable_width_px", "usable_height_px"):
+            with self.subTest(field=field):
+                data = self._valid_manifest()
+                data["captures"][0][field] += 0.5
+                with self.assertRaisesRegex(ValidationError, field):
+                    validate_manifest(self._write(data))
 
 
 if __name__ == "__main__":

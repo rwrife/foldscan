@@ -134,7 +134,9 @@ python3 hardware/optical-spike/validate_manifest.py \
   hardware/optical-spike/samples/<run-id>/manifest.json
 ```
 
-The validator requires A4 and Letter captures, all primary conditions, 30 latency samples per page size, ten refold-cycle observations, power/thermal observations, existing files, byte counts, and SHA-256 matches. It does not judge optical quality; reviewers must compare measured results against `hardware/requirements.md`.
+The validator requires A4 and Letter captures, all primary conditions, 30 latency samples per page size, ten refold-cycle observations, power/thermal observations, existing files, integer byte/pixel counts, and SHA-256 matches. Real bench manifests also require canonical UTC/commit provenance, positive measured dimensions/density/current/latency/sample-rate values, a thermal run of at least 30 minutes, bounded humidity and saturation fractions, internally consistent image dimensions, and a combined-current peak no lower than any constituent peak. Template mode checks the complete collection shape but explicitly permits placeholders and zeroes.
+
+These checks establish metadata completeness, path safety, internal consistency, and file integrity only. They do not prove that measurements were taken correctly or that optical, timing, mechanical, electrical, or thermal acceptance thresholds passed; reviewers must compare the raw evidence and measured results against `hardware/requirements.md`.
 
 Validate the committed metadata template only:
 

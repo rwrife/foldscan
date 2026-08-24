@@ -1,0 +1,51 @@
+name: Optical evidence gate
+
+on:
+  pull_request:
+    paths:
+      - "hardware/optical-spike/**"
+      - ".github/workflows/optical-evidence.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "hardware/optical-spike/**"
+      - ".github/workflows/optical-evidence.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: optical-evidence-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate optical evidence contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run validator tests
+        run: python3 -m unittest discover -s hardware/optical-spike -p 'test_*.py' -v
+
+      - name: Compile validator sources
+        run: python3 -m py_compile hardware/optical-spike/validate_manifest.py hardware/optical-spike/test_validate_manifest.py
+
+      - name: Validate collection template shape
+        run: python3 hardware/optical-spike/validate_manifest.py hardware/optical-spike/manifest.example.json --allow-template
+
+      - name: Verify template cannot pass as bench evidence
+        shell: bash
+        run: |
+          if python3 hardware/optical-spike/validate_manifest.py hardware/optical-spike/manifest.example.json; then
+            echo "Template unexpectedly passed as bench evidence" >&2
+            exit 1
+          fi

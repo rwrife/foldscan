@@ -3,6 +3,8 @@ build/
 dist/
 target/
 node_modules/
+__pycache__/
+*.py[cod]
 
 # IDE and OS
 .DS_Store
