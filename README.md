@@ -89,7 +89,7 @@ The companion must support keyboard-only operation, visible focus, scalable text
 
 ## Status and milestones
 
-**Current status: documentation and backlog only.** No KiCad project, schematic, PCB, validated BOM, firmware/app build, ERC/DRC result, processed scan, fabrication package, enclosure, or physical test evidence exists yet.
+**Current status: architecture/documentation gate in progress; physical gate open.** ADR 0001 identifies the exact candidate bundle and blocks camera/PCB freeze because no physically identified sensor/lens, stand, raw optical corpus, current trace, or thermal measurement exists. The repository still has no KiCad project, schematic, PCB, validated schematic-derived BOM, firmware/app build, fabrication package, enclosure, or physical test evidence. See [`hardware/optical-spike/`](hardware/optical-spike/) for the reproducible bench procedure and honest evidence ledger.
 
 1. Requirements, optical feasibility, architecture, and safety review.
 2. Datasheet-backed component selection and editable KiCad schematic/BOM.

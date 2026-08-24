@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297">
+  <title>FoldScan A4 optical spike target v1.0</title>
+  <desc>Non-sensitive geometric, line-pair, and text target. Print at 100 percent and verify the 100 mm ruler.</desc>
+  <rect width="210" height="297" fill="white"/>
+  <g fill="none" stroke="black" stroke-width="0.2">
+    <rect x="8" y="8" width="194" height="281"/>
+    <path d="M8 18H202 M8 279H202 M18 8V289 M192 8V289" stroke-dasharray="1 1"/>
+    <path d="M105 8V289 M8 148.5H202" stroke="#777" stroke-width="0.1"/>
+    <circle cx="105" cy="148.5" r="25"/>
+    <circle cx="105" cy="148.5" r="12.5"/>
+    <path d="M70 148.5H140 M105 113.5V183.5"/>
+  </g>
+
+  <defs>
+    <g id="corner" fill="none" stroke="black" stroke-width="0.25">
+      <rect x="0" y="0" width="30" height="30"/>
+      <path d="M0 15H30 M15 0V30"/>
+      <circle cx="15" cy="15" r="8"/>
+      <path d="M9.34 9.34L20.66 20.66 M20.66 9.34L9.34 20.66"/>
+    </g>
+    <pattern id="lp1" width="1" height="2" patternUnits="userSpaceOnUse"><rect width="0.5" height="2" fill="black"/></pattern>
+    <pattern id="lp2" width="0.5" height="2" patternUnits="userSpaceOnUse"><rect width="0.25" height="2" fill="black"/></pattern>
+    <pattern id="lp3" width="0.333333" height="2" patternUnits="userSpaceOnUse"><rect width="0.166667" height="2" fill="black"/></pattern>
+    <pattern id="lp4" width="0.25" height="2" patternUnits="userSpaceOnUse"><rect width="0.125" height="2" fill="black"/></pattern>
+  </defs>
+
+  <use href="#corner" x="13" y="23"/>
+  <use href="#corner" x="167" y="23"/>
+  <use href="#corner" x="13" y="234"/>
+  <use href="#corner" x="167" y="234"/>
+
+  <g font-family="DejaVu Sans, Arial, sans-serif" fill="black" text-anchor="middle">
+    <text x="105" y="15" font-size="4.2" font-weight="bold">FoldScan optical target v1.0 — A4 — print 100%</text>
+    <text x="105" y="21" font-size="2.8">Non-sensitive project test text · preserve uncorrected captures</text>
+    <text x="105" y="105" font-size="4.233">12 pt: Quartz glyphs vex bold Jim; 0123456789</text>
+    <text x="105" y="112" font-size="3.528">10 pt: Pack my box with five dozen jugs; 0123456789</text>
+    <text x="105" y="118" font-size="2.822">8 pt: Sphinx of black quartz, judge my vow; 0123456789</text>
+    <text x="105" y="123" font-size="2.117">6 pt: The five boxing wizards jump quickly; 0123456789</text>
+    <text x="105" y="128" font-size="1.764">5 pt: Waltz, bad nymph, for quick jigs vex; 0123456789</text>
+    <text x="105" y="174" font-size="2.8">CENTER</text>
+    <text x="28" y="58" font-size="2.8">TOP LEFT</text>
+    <text x="182" y="58" font-size="2.8">TOP RIGHT</text>
+    <text x="28" y="232" font-size="2.8">BOTTOM LEFT</text>
+    <text x="182" y="232" font-size="2.8">BOTTOM RIGHT</text>
+  </g>
+
+  <g font-family="DejaVu Sans, Arial, sans-serif" font-size="2.5" fill="black">
+    <text x="64" y="194">Vertical line pairs/mm</text>
+    <text x="64" y="201">1</text><rect x="70" y="197" width="20" height="6" fill="url(#lp1)"/>
+    <text x="64" y="210">2</text><rect x="70" y="206" width="20" height="6" fill="url(#lp2)"/>
+    <text x="64" y="219">3</text><rect x="70" y="215" width="20" height="6" fill="url(#lp3)"/>
+    <text x="64" y="228">4</text><rect x="70" y="224" width="20" height="6" fill="url(#lp4)"/>
+    <text x="120" y="194">Horizontal line pairs/mm</text>
+    <g transform="translate(140 197) rotate(90)">
+      <rect width="20" height="6" fill="url(#lp1)"/>
+      <rect x="0" y="9" width="20" height="6" fill="url(#lp2)"/>
+      <rect x="0" y="18" width="20" height="6" fill="url(#lp3)"/>
+      <rect x="0" y="27" width="20" height="6" fill="url(#lp4)"/>
+    </g>
+    <text x="148" y="202">1</text><text x="157" y="202">2</text><text x="166" y="202">3</text><text x="175" y="202">4</text>
+  </g>
+
+  <g transform="translate(20 270)" stroke="black" fill="none">
+    <path d="M0 0H100" stroke-width="0.4"/>
+    <path d="M0 -4V4 M10 -2V2 M20 -2V2 M30 -2V2 M40 -2V2 M50 -4V4 M60 -2V2 M70 -2V2 M80 -2V2 M90 -2V2 M100 -4V4" stroke-width="0.25"/>
+  </g>
+  <g font-family="DejaVu Sans, Arial, sans-serif" font-size="2.5" fill="black" text-anchor="middle">
+    <text x="20" y="278">0</text><text x="70" y="278">50</text><text x="120" y="278">100 mm</text>
+    <text x="165" y="276">Verify ruler before use</text>
+  </g>
+
+  <g fill="none" stroke="#999" stroke-width="0.08">
+    <path d="M18 68H192 M18 78H192 M18 88H192 M18 98H192 M18 188H192"/>
+    <path d="M55 18V279 M155 18V279"/>
+  </g>
+</svg>

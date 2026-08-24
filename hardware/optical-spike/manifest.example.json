@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0",
+  "template": true,
+  "evidence_category": "template-not-run",
+  "run_id": "replace-with-utc-run-id",
+  "captured_at_utc": "replace-with-iso-8601",
+  "operator": "replace-with-operator",
+  "license_or_consent": "project-owned non-sensitive target; replace with corpus license/consent",
+  "artifact_url": null,
+  "device": {
+    "manufacturer": "Seeed Studio",
+    "sku": "113991115",
+    "main_board_revision": "record physical marking",
+    "expansion_board_revision": "record physical marking",
+    "camera_sensor_marking": "record physical marking; do not infer from SKU",
+    "lens_marking": "record physical marking or explicitly document absence after inspection",
+    "firmware_commit": "full git commit SHA",
+    "micro_sd_mpn": "manufacturer and exact MPN"
+  },
+  "fixture": {
+    "stand_material": "record material",
+    "joint_type": "record joint and stops",
+    "support_mode": "clamped, ballasted, or free-standing",
+    "supply": "manufacturer, model, certifications, and rating",
+    "usb_cable": "manufacturer/model or identifying description and length",
+    "camera_height_mm": 0,
+    "arm_span_mm": 0,
+    "base_width_mm": 0,
+    "base_depth_mm": 0,
+    "camera_head_mass_g": 0,
+    "ambient_temperature_c": 0,
+    "relative_humidity_percent": 0
+  },
+  "captures": [],
+  "mechanical": {
+    "refold_cycles": [],
+    "vertical_deflection_10min_mm": 0
+  },
+  "power_and_thermal": {
+    "idle_current_ma": 0,
+    "capture_peak_current_ma": 0,
+    "sd_write_peak_current_ma": 0,
+    "usb_transfer_peak_current_ma": 0,
+    "illumination_current_ma": 0,
+    "combined_peak_current_ma": 0,
+    "module_temperature_c": 0,
+    "diffuser_temperature_c": 0,
+    "max_touchable_temperature_c": 0,
+    "test_duration_minutes": 0,
+    "current_sample_rate_hz": 0,
+    "instrument": "record instrument and range"
+  }
+}

@@ -69,4 +69,4 @@ Images and PDFs are documentation, not substitutes for editable source.
 
 ## Current status
 
-Planning only. There is no schematic, PCB, validated BOM, ERC/DRC output, enclosure, assembled carrier, or bench evidence yet.
+Documentation review is complete for the disposable-spike architecture, but physical validation is not. See [ADR 0001](../docs/adr/0001-capture-architecture-and-optical-gate.md) and [`optical-spike/`](optical-spike/). Camera and custom-carrier freeze are **STOP/HOLD** because no received sensor/lens, raw capture corpus, stand measurement, current trace, or thermal result exists. There is still no schematic, PCB, validated schematic-derived BOM, enclosure, assembled carrier, or bench evidence.
