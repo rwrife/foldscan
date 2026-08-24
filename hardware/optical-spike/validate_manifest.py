@@ -7,8 +7,10 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,54 @@ CONDITION_MINIMUMS = {
     "symmetric-glossy": 3,
 }
 PLACEHOLDER_WORDS = {"", "unknown", "tbd", "not measured", "not-measured", "n/a", "none"}
+TEMPLATE_SHAPE = {
+    "run_id": str,
+    "captured_at_utc": str,
+    "operator": str,
+    "license_or_consent": str,
+    "device": {
+        "manufacturer": str,
+        "sku": str,
+        "main_board_revision": str,
+        "expansion_board_revision": str,
+        "camera_sensor_marking": str,
+        "lens_marking": str,
+        "firmware_commit": str,
+        "micro_sd_mpn": str,
+    },
+    "fixture": {
+        "stand_material": str,
+        "joint_type": str,
+        "support_mode": str,
+        "supply": str,
+        "usb_cable": str,
+        "camera_height_mm": "number",
+        "arm_span_mm": "number",
+        "base_width_mm": "number",
+        "base_depth_mm": "number",
+        "camera_head_mass_g": "number",
+        "ambient_temperature_c": "number",
+        "relative_humidity_percent": "number",
+    },
+    "mechanical": {
+        "refold_cycles": list,
+        "vertical_deflection_10min_mm": "number",
+    },
+    "power_and_thermal": {
+        "idle_current_ma": "number",
+        "capture_peak_current_ma": "number",
+        "sd_write_peak_current_ma": "number",
+        "usb_transfer_peak_current_ma": "number",
+        "illumination_current_ma": "number",
+        "combined_peak_current_ma": "number",
+        "module_temperature_c": "number",
+        "diffuser_temperature_c": "number",
+        "max_touchable_temperature_c": "number",
+        "test_duration_minutes": "number",
+        "current_sample_rate_hz": "number",
+        "instrument": str,
+    },
+}
 
 
 class ValidationError(ValueError):
@@ -40,13 +90,72 @@ def _require_text(mapping: dict[str, Any], key: str, location: str) -> str:
     return value.strip()
 
 
-def _require_number(mapping: dict[str, Any], key: str, location: str, *, minimum: float = 0.0) -> float:
+def _require_number(
+    mapping: dict[str, Any],
+    key: str,
+    location: str,
+    *,
+    minimum: float = 0.0,
+    maximum: float | None = None,
+    exclusive_minimum: bool = False,
+) -> float:
     value = _require(mapping, key, location)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValidationError(f"{location}.{key}: must be a finite number")
+    if value < minimum or (exclusive_minimum and value == minimum):
+        operator = ">" if exclusive_minimum else ">="
+        raise ValidationError(f"{location}.{key}: must be {operator} {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValidationError(f"{location}.{key}: must be <= {maximum}")
+    return float(value)
+
+
+def _require_integer(
+    mapping: dict[str, Any], key: str, location: str, *, minimum: int = 0
+) -> int:
+    value = _require(mapping, key, location)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError(f"{location}.{key}: must be an integer")
     if value < minimum:
         raise ValidationError(f"{location}.{key}: must be >= {minimum}")
-    return float(value)
+    return value
+
+
+def _require_utc_timestamp(mapping: dict[str, Any], key: str, location: str) -> str:
+    value = _require_text(mapping, key, location)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value) is None:
+        raise ValidationError(f"{location}.{key}: must use UTC format YYYY-MM-DDTHH:MM:SSZ")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValidationError(
+            f"{location}.{key}: must use UTC format YYYY-MM-DDTHH:MM:SSZ"
+        ) from exc
+    return value
+
+
+def _require_full_commit(mapping: dict[str, Any], key: str, location: str) -> str:
+    value = _require_text(mapping, key, location)
+    if len(value) not in {40, 64} or any(char not in "0123456789abcdef" for char in value):
+        raise ValidationError(f"{location}.{key}: must be a full lowercase hexadecimal commit ID")
+    return value
+
+
+def _require_template_shape(
+    mapping: dict[str, Any], schema: dict[str, Any] = TEMPLATE_SHAPE, location: str = "manifest"
+) -> None:
+    for key, expected in schema.items():
+        value = _require(mapping, key, location)
+        field_location = f"{location}.{key}"
+        if isinstance(expected, dict):
+            if not isinstance(value, dict):
+                raise ValidationError(f"{field_location}: template value must be an object")
+            _require_template_shape(value, expected, field_location)
+        elif expected == "number":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValidationError(f"{field_location}: template value must be numeric")
+        elif not isinstance(value, expected):
+            raise ValidationError(f"{field_location}: template value must be {expected.__name__}")
 
 
 def _sha256(path: Path) -> str:
@@ -75,6 +184,7 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
             raise ValidationError("template evidence_category must be 'template-not-run'")
         if data.get("captures") != []:
             raise ValidationError("template captures must be empty")
+        _require_template_shape(data)
         return {"kind": "template", "captures": 0, "files_verified": 0}
 
     if allow_template:
@@ -83,7 +193,7 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
         raise ValidationError("real runs must use evidence_category 'bench-test'")
 
     _require_text(data, "run_id", "manifest")
-    _require_text(data, "captured_at_utc", "manifest")
+    _require_utc_timestamp(data, "captured_at_utc", "manifest")
     _require_text(data, "operator", "manifest")
     _require_text(data, "license_or_consent", "manifest")
 
@@ -97,10 +207,10 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
         "expansion_board_revision",
         "camera_sensor_marking",
         "lens_marking",
-        "firmware_commit",
         "micro_sd_mpn",
     ):
         _require_text(device, field, "device")
+    _require_full_commit(device, "firmware_commit", "device")
     if device["sku"] != "113991115":
         raise ValidationError("device.sku must identify the current candidate as '113991115'")
 
@@ -115,10 +225,10 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
         "base_width_mm",
         "base_depth_mm",
         "camera_head_mass_g",
-        "ambient_temperature_c",
-        "relative_humidity_percent",
     ):
-        _require_number(fixture, field, "fixture", minimum=0.0)
+        _require_number(fixture, field, "fixture", minimum=0.0, exclusive_minimum=True)
+    _require_number(fixture, "ambient_temperature_c", "fixture", minimum=0.0)
+    _require_number(fixture, "relative_humidity_percent", "fixture", minimum=0.0, maximum=100.0)
 
     captures = _require(data, "captures", "manifest")
     if not isinstance(captures, list) or not captures:
@@ -154,7 +264,7 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
         if not path.is_file():
             raise ValidationError(f"{location}.path: file does not exist: {relative}")
 
-        expected_bytes = int(_require_number(capture, "bytes", location, minimum=1))
+        expected_bytes = _require_integer(capture, "bytes", location, minimum=1)
         if path.stat().st_size != expected_bytes:
             raise ValidationError(
                 f"{location}.bytes: expected {expected_bytes}, found {path.stat().st_size} for {relative}"
@@ -166,21 +276,27 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
         if actual_sha != expected_sha:
             raise ValidationError(f"{location}.sha256: mismatch for {relative}")
 
-        _require_number(capture, "width_px", location, minimum=1)
-        _require_number(capture, "height_px", location, minimum=1)
-        _require_number(capture, "latency_to_durable_file_ms", location, minimum=0)
-        _require_number(capture, "usable_width_px", location, minimum=1)
-        _require_number(capture, "usable_height_px", location, minimum=1)
+        width_px = _require_integer(capture, "width_px", location, minimum=1)
+        height_px = _require_integer(capture, "height_px", location, minimum=1)
+        _require_number(
+            capture, "latency_to_durable_file_ms", location, minimum=0, exclusive_minimum=True
+        )
+        usable_width_px = _require_integer(capture, "usable_width_px", location, minimum=1)
+        usable_height_px = _require_integer(capture, "usable_height_px", location, minimum=1)
+        if usable_width_px > width_px:
+            raise ValidationError(f"{location}.usable_width_px: cannot exceed width_px")
+        if usable_height_px > height_px:
+            raise ValidationError(f"{location}.usable_height_px: cannot exceed height_px")
         for field in (
             "center_px_per_mm",
             "top_left_px_per_mm",
             "top_right_px_per_mm",
             "bottom_left_px_per_mm",
             "bottom_right_px_per_mm",
-            "max_distortion_px",
-            "saturated_pixel_fraction",
         ):
-            _require_number(capture, field, location, minimum=0)
+            _require_number(capture, field, location, minimum=0, exclusive_minimum=True)
+        _require_number(capture, "max_distortion_px", location, minimum=0)
+        _require_number(capture, "saturated_pixel_fraction", location, minimum=0, maximum=1.0)
         _require_text(capture, "smallest_readable_text_pt", location)
         _require_text(capture, "exposure_settings", location)
         files_verified += 1
@@ -211,20 +327,37 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
     power = _require(data, "power_and_thermal", "manifest")
     if not isinstance(power, dict):
         raise ValidationError("manifest.power_and_thermal must be an object")
-    for field in (
+    current_fields = (
         "idle_current_ma",
         "capture_peak_current_ma",
         "sd_write_peak_current_ma",
         "usb_transfer_peak_current_ma",
         "illumination_current_ma",
         "combined_peak_current_ma",
+    )
+    currents = {
+        field: _require_number(
+            power, field, "power_and_thermal", minimum=0, exclusive_minimum=True
+        )
+        for field in current_fields
+    }
+    constituent_peak = max(
+        value for field, value in currents.items() if field != "combined_peak_current_ma"
+    )
+    if currents["combined_peak_current_ma"] < constituent_peak:
+        raise ValidationError(
+            "power_and_thermal.combined_peak_current_ma: cannot be lower than a constituent peak"
+        )
+    _require_number(
+        power, "current_sample_rate_hz", "power_and_thermal", minimum=0, exclusive_minimum=True
+    )
+    for field in (
         "module_temperature_c",
         "diffuser_temperature_c",
         "max_touchable_temperature_c",
-        "test_duration_minutes",
-        "current_sample_rate_hz",
     ):
         _require_number(power, field, "power_and_thermal", minimum=0)
+    _require_number(power, "test_duration_minutes", "power_and_thermal", minimum=30)
     _require_text(power, "instrument", "power_and_thermal")
 
     return {
