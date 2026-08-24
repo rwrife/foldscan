@@ -1,6 +1,26 @@
 # FoldScan hardware and system requirements
 
-Status: initial measurable targets for validation. Values are requirements or planning envelopes, not measured results.
+Status: measurable targets plus the 2026-08-24 documentation-gate snapshot. Values are requirements or planning envelopes, not measured results.
+
+## Validation status snapshot
+
+Evidence vocabulary is defined at the end of this file. `PASS (documentation)` means only that a source/calculation supports the stated architecture; it is not bench verification.
+
+| Area / requirement | Status | Evidence and next gate |
+|---|---|---|
+| ELEC-01: USB 5 V SELV-only architecture | PASS (documentation) | ADR 0001 retains a certified/current-limited USB source and forbids battery connection, mains, UV, and laser. Physical supply/cable remain unselected. |
+| ELEC-02: 5 V, 3 A envelope | UNKNOWN (bench blocked) | Seeed documents about 347 mA capture peak for its example; illumination, combined transient, cable, and measured margin are unknown. |
+| ELEC-07: antenna keepout | UNKNOWN (design blocked) | U.FL antenna requirement is documented, but cable/enclosure geometry does not exist. |
+| OPT-01/02: full-page framing and readable detail | UNKNOWN — CAMERA FREEZE STOPPED | Sensor shipment and lens/FOV are not physically identified; no raw A4/Letter corpus or center/corner measurement exists. |
+| OPT-03: durable-file latency | UNKNOWN (bench blocked) | Procedure requires 30 captures per page size; no module is connected. |
+| OPT-04: illumination uniformity | UNKNOWN (bench blocked) | Symmetric/one-sided/glossy capture matrix is defined; lights are unselected and unmeasured. |
+| DATA-01: 200-page capacity | UNKNOWN | Manufacturer documents up to 32 GB FAT32, but representative file size and sustained queue behavior are unmeasured. |
+| DATA-03: USB/removable baseline | PASS (architecture), UNKNOWN (integration) | ADR 0001 makes microSD/USB baseline and Wi-Fi unnecessary; transfer behavior is not tested. |
+| MECH-02/03/04: framing, repeatability, deflection | UNKNOWN (bench blocked) | Fixture and ten-cycle/ten-minute methods are specified; no stand exists. |
+| ENV-02: thermal limits | UNKNOWN (bench blocked) | Module, illumination, diffuser, connector, and touch temperatures require a 30-minute physical run. |
+| COST-01: USD 50–75 envelope | UNKNOWN | Candidate module has dated manufacturer price evidence; all remaining lines are unpriced/unselected. |
+
+Current go/change/stop decision: **GO** for a disposable off-the-shelf spike architecture; **STOP/HOLD** the camera, mechanical, and custom-carrier freeze until `hardware/optical-spike/` contains a real checksum-validated bench run.
 
 ## Electrical
 

@@ -57,6 +57,8 @@ Alternatives to evaluate rather than assume: OV2640-class versus higher-resoluti
 
 ### M0 — requirements and risk closure
 
+**2026-08-24 status:** documentation/calculation gate complete; physical gate blocked. Architecture may proceed only as the disposable spike in ADR 0001. Camera, mechanical geometry, illumination, and custom-carrier freeze are **STOP/HOLD** until a real run passes `hardware/optical-spike/validate_manifest.py` without the template override.
+
 - Fix page sizes, camera height/field of view, sharpness/readability metrics, capture timing, storage behavior, stand stability, light/thermal limits, and target budget.
 - Build a disposable module-and-stand optical spike before committing to a PCB.
 - Record accepted limitations for glossy pages, curled pages, handwriting, and fine print.
@@ -129,16 +131,16 @@ No issue may call unbuilt hardware “tested.”
 
 ## Risks and mitigations
 
-| Risk | Mitigation |
-|---|---|
-| Candidate camera cannot resolve fine print across A4 | Optical spike and printed targets before PCB freeze; allow a documented higher-resolution module path. |
-| Folded stand tips, sags, or loses alignment | Measurable center-of-mass/deflection requirements, hinge stops, optional desk clamp, replaceable calibration target. |
-| LED glare, heat, or rolling-band artifacts | Diffusion, angled dual lighting, bounded PWM/frequency, thermal/current measurements, exposure lock experiments. |
-| Power loss corrupts storage | Atomic manifest updates, temp-file rename, checksums, recovery tests, explicit safe-eject state. |
-| Wi-Fi expands attack surface | USB-first baseline, disabled by default, local-only pairing, no inbound internet dependency, protocol limits. |
-| OCR errors are trusted | Keep originals, show confidence/uncertain text, require review, label OCR as convenience rather than authoritative transcription. |
-| BOM price/availability drifts | Manufacturer/MPN source of truth in KiCad, dated validation, alternatives only after pin/package review. |
-| Scope expands into archival/book automation | Enforce single-page/manual-turn MVP and explicit non-goals. |
+| Risk | Status (2026-08-24) | Mitigation / evidence gate |
+|---|---|---|
+| Candidate camera cannot resolve fine print across A4 | **UNKNOWN — freeze stopped** | Seeed SKU 113991115 may ship with different sensors and no reviewed source specifies the supplied lens/FOV. Run the checksum-validated A4/Letter matrix before PCB freeze; allow a documented higher-resolution module path. |
+| Folded stand tips, sags, or loses alignment | **UNKNOWN — no stand** | Measurable center-of-mass/deflection requirements, hinge stops, optional desk clamp, replaceable calibration target, and ten-cycle measurements. |
+| LED glare, heat, or rolling-band artifacts | **UNKNOWN — no lights** | Diffusion, angled dual lighting, one-sided/glossy controls, bounded PWM/frequency, thermal/current measurements, exposure-lock experiments. |
+| Power loss corrupts storage | **UNKNOWN — no firmware/device test** | Atomic manifest updates, temp-file rename, checksums, recovery tests, explicit safe-eject state. |
+| Wi-Fi expands attack surface | **CONTROL ACCEPTED; implementation deferred** | USB-first baseline, disabled by default, local-only pairing, no inbound internet dependency, protocol limits. |
+| OCR errors are trusted | **CONTROL ACCEPTED; app unbuilt** | Keep originals, show confidence/uncertain text, require review, label OCR as convenience rather than authoritative transcription. |
+| BOM price/availability drifts | **OPEN** | Manufacturer/MPN source of truth in KiCad, dated validation, alternatives only after pin/package review. The candidate module has one dated manufacturer price; no total quote exists. |
+| Scope expands into archival/book automation | **CONTROL ACCEPTED** | Enforce single-page/manual-turn MVP and explicit non-goals. |
 
 ## Explicit non-goals
 
