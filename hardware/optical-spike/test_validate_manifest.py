@@ -10,6 +10,9 @@ from pathlib import Path
 from validate_manifest import ValidationError, validate_manifest
 
 
+JPEG_FIXTURE = (Path(__file__).with_name("test-fixtures") / "white-16x16.jpg").read_bytes()
+
+
 class ManifestValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -17,6 +20,20 @@ class ManifestValidationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    @staticmethod
+    def _jpeg_bytes(width: int, height: int, capture_id: str) -> bytes:
+        """Add a unique JPEG comment to a genuinely decodable 16x16 fixture."""
+        if (width, height) != (16, 16):
+            raise ValueError("test JPEG fixture is 16x16")
+        comment = capture_id.encode("ascii")
+        return (
+            JPEG_FIXTURE[:-2]
+            + b"\xff\xfe"
+            + (len(comment) + 2).to_bytes(2, "big")
+            + comment
+            + JPEG_FIXTURE[-2:]
+        )
 
     def _valid_manifest(self) -> dict:
         raw = self.root / "raw"
@@ -35,7 +52,7 @@ class ManifestValidationTests(unittest.TestCase):
                 for _ in range(count):
                     sequence += 1
                     capture_id = f"capture-{sequence:03d}"
-                    payload = f"non-sensitive fixture bytes {capture_id}".encode()
+                    payload = self._jpeg_bytes(16, 16, capture_id)
                     path = raw / f"{capture_id}.jpg"
                     path.write_bytes(payload)
                     captures.append(
@@ -46,11 +63,11 @@ class ManifestValidationTests(unittest.TestCase):
                             "path": f"raw/{capture_id}.jpg",
                             "bytes": len(payload),
                             "sha256": hashlib.sha256(payload).hexdigest(),
-                            "width_px": 2048,
-                            "height_px": 1536,
+                            "width_px": 16,
+                            "height_px": 16,
                             "latency_to_durable_file_ms": 1250,
-                            "usable_width_px": 1900,
-                            "usable_height_px": 1400,
+                            "usable_width_px": 15,
+                            "usable_height_px": 14,
                             "center_px_per_mm": 6.4,
                             "top_left_px_per_mm": 6.2,
                             "top_right_px_per_mm": 6.3,
@@ -123,6 +140,12 @@ class ManifestValidationTests(unittest.TestCase):
         path.write_text(json.dumps(data), encoding="utf-8")
         return path
 
+    def _replace_first_capture_payload(self, data: dict, payload: bytes) -> None:
+        capture = data["captures"][0]
+        (self.root / capture["path"]).write_bytes(payload)
+        capture["bytes"] = len(payload)
+        capture["sha256"] = hashlib.sha256(payload).hexdigest()
+
     def _template_manifest(self) -> dict:
         template_path = Path(__file__).with_name("manifest.example.json")
         return json.loads(template_path.read_text(encoding="utf-8"))
@@ -138,6 +161,146 @@ class ManifestValidationTests(unittest.TestCase):
         data = self._valid_manifest()
         data["captures"][0]["sha256"] = "0" * 64
         with self.assertRaisesRegex(ValidationError, "mismatch"):
+            validate_manifest(self._write(data))
+
+    def test_non_jpeg_payload_cannot_claim_capture_dimensions(self) -> None:
+        data = self._valid_manifest()
+        payload = b"not a jpeg image"
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "JPEG"):
+            validate_manifest(self._write(data))
+
+    def test_claimed_dimensions_must_match_jpeg_header(self) -> None:
+        data = self._valid_manifest()
+        data["captures"][0]["width_px"] = 2200
+        with self.assertRaisesRegex(ValidationError, "encoded JPEG dimensions"):
+            validate_manifest(self._write(data))
+
+    def test_capture_file_cannot_be_reused_under_another_id(self) -> None:
+        data = self._valid_manifest()
+        first = data["captures"][0]
+        second = data["captures"][1]
+        for field in ("path", "bytes", "sha256", "width_px", "height_px"):
+            second[field] = first[field]
+        with self.assertRaisesRegex(ValidationError, "reuses capture file"):
+            validate_manifest(self._write(data))
+
+    def test_capture_file_cannot_be_reused_through_hard_link(self) -> None:
+        data = self._valid_manifest()
+        first = data["captures"][0]
+        second = data["captures"][1]
+        first_path = self.root / first["path"]
+        second_path = self.root / second["path"]
+        second_path.unlink()
+        second_path.hardlink_to(first_path)
+        for field in ("bytes", "sha256", "width_px", "height_px"):
+            second[field] = first[field]
+        with self.assertRaisesRegex(ValidationError, "reuses physical capture file"):
+            validate_manifest(self._write(data))
+
+    def test_truncated_sof_component_table_is_not_a_jpeg_header(self) -> None:
+        data = self._valid_manifest()
+        frame_prefix = b"\x08\x00\x10\x00\x10\x03"
+        payload = b"\xff\xd8\xff\xc0\x00\x11" + frame_prefix
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "truncated (?:marker|component table)"):
+            validate_manifest(self._write(data))
+
+    def test_complete_sof_without_scan_is_not_a_jpeg_file(self) -> None:
+        data = self._valid_manifest()
+        components = b"\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+        frame = b"\x08\x00\x10\x00\x10\x03" + components
+        payload = b"\xff\xd8\xff\xc0\x00\x11" + frame + b"\xff\xd9"
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "image scan"):
+            validate_manifest(self._write(data))
+
+    def test_missing_end_of_image_marker_is_not_a_jpeg_file(self) -> None:
+        data = self._valid_manifest()
+        self._replace_first_capture_payload(data, JPEG_FIXTURE[:-2])
+        with self.assertRaisesRegex(ValidationError, "end-of-image"):
+            validate_manifest(self._write(data))
+
+    def test_repeated_start_of_image_marker_is_rejected(self) -> None:
+        data = self._valid_manifest()
+        payload = JPEG_FIXTURE[:2] + b"\xff\xd8" + JPEG_FIXTURE[2:]
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "repeated start-of-image"):
+            validate_manifest(self._write(data))
+
+    def test_reserved_marker_is_rejected(self) -> None:
+        data = self._valid_manifest()
+        payload = JPEG_FIXTURE[:2] + b"\xff\x02\x00\x02" + JPEG_FIXTURE[2:]
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "unsupported marker"):
+            validate_manifest(self._write(data))
+
+    def test_scan_selector_must_exist_in_frame_components(self) -> None:
+        data = self._valid_manifest()
+        payload = bytearray(JPEG_FIXTURE)
+        scan_marker = payload.index(b"\xff\xda")
+        first_selector = scan_marker + 5
+        payload[first_selector] = 9
+        self._replace_first_capture_payload(data, bytes(payload))
+        with self.assertRaisesRegex(ValidationError, "scan component selector"):
+            validate_manifest(self._write(data))
+
+    def test_empty_image_scan_is_rejected(self) -> None:
+        data = self._valid_manifest()
+        components = b"\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+        frame = b"\x08\x00\x10\x00\x10\x03" + components
+        scan = b"\x03\x01\x00\x02\x00\x03\x00\x00\x3f\x00"
+        payload = b"\xff\xd8\xff\xc0\x00\x11" + frame + b"\xff\xda\x00\x0c" + scan + b"\xff\xd9"
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "empty image scan"):
+            validate_manifest(self._write(data))
+
+    def test_symlinked_capture_directory_is_rejected(self) -> None:
+        data = self._valid_manifest()
+        (self.root / "alias").symlink_to(self.root / "raw", target_is_directory=True)
+        data["captures"][0]["path"] = "alias/capture-001.jpg"
+        with self.assertRaisesRegex(ValidationError, "securely read capture"):
+            validate_manifest(self._write(data))
+
+    def test_declared_capture_size_has_a_safe_upper_bound(self) -> None:
+        data = self._valid_manifest()
+        data["captures"][0]["bytes"] = 50 * 1024 * 1024 + 1
+        with self.assertRaisesRegex(ValidationError, "exceeds maximum"):
+            validate_manifest(self._write(data))
+
+    def test_baseline_frame_requires_eight_bit_precision(self) -> None:
+        data = self._valid_manifest()
+        payload = bytearray(JPEG_FIXTURE)
+        frame_marker = payload.index(b"\xff\xc0")
+        payload[frame_marker + 4] = 12
+        self._replace_first_capture_payload(data, bytes(payload))
+        with self.assertRaisesRegex(ValidationError, "sample precision"):
+            validate_manifest(self._write(data))
+
+    def test_frame_sampling_factor_cannot_be_zero(self) -> None:
+        data = self._valid_manifest()
+        payload = bytearray(JPEG_FIXTURE)
+        frame_marker = payload.index(b"\xff\xc0")
+        payload[frame_marker + 11] = 0
+        self._replace_first_capture_payload(data, bytes(payload))
+        with self.assertRaisesRegex(ValidationError, "sampling factor"):
+            validate_manifest(self._write(data))
+
+    def test_every_frame_component_must_appear_in_a_scan(self) -> None:
+        data = self._valid_manifest()
+        components = b"\x01\x11\x00\x02\x11\x00\x03\x11\x00"
+        frame = b"\x08\x00\x10\x00\x10\x03" + components
+        scan = b"\x01\x01\x00\x00\x3f\x00"
+        payload = b"\xff\xd8\xff\xc0\x00\x11" + frame + b"\xff\xda\x00\x08" + scan + b"\x01\xff\xd9"
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "missing frame components"):
+            validate_manifest(self._write(data))
+
+    def test_restart_interval_marker_requires_two_byte_payload(self) -> None:
+        data = self._valid_manifest()
+        payload = JPEG_FIXTURE[:2] + b"\xff\xdd\x00\x03\x00" + JPEG_FIXTURE[2:]
+        self._replace_first_capture_payload(data, payload)
+        with self.assertRaisesRegex(ValidationError, "restart interval"):
             validate_manifest(self._write(data))
 
     def test_missing_primary_condition_fails(self) -> None:
