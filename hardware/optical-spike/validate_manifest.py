@@ -7,7 +7,9 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import sys
 from collections import Counter
 from datetime import datetime
@@ -22,6 +24,9 @@ CONDITION_MINIMUMS = {
     "right-light-only": 3,
     "symmetric-glossy": 3,
 }
+SUPPORTED_SOF_MARKERS = {0xC0}
+ALLOWED_SEGMENT_MARKERS = {0xC4, 0xDB, 0xDD, 0xFE, *range(0xE0, 0xF0)}
+MAX_CAPTURE_BYTES = 50 * 1024 * 1024
 PLACEHOLDER_WORDS = {"", "unknown", "tbd", "not measured", "not-measured", "n/a", "none"}
 TEMPLATE_SHAPE = {
     "run_id": str,
@@ -158,12 +163,211 @@ def _require_template_shape(
             raise ValidationError(f"{field_location}: template value must be {expected.__name__}")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _read_confined_capture(
+    base: Path, relative: Path, location: str, expected_bytes: int
+) -> tuple[bytes, os.stat_result]:
+    """Read a regular file through a no-symlink descriptor walk rooted at / on POSIX."""
+    if (
+        os.name != "posix"
+        or os.open not in os.supports_dir_fd
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+    ):
+        raise ValidationError(
+            f"{location}.path: platform cannot securely read capture without symlink traversal"
+        )
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_fd = -1
+    try:
+        directory_fd = os.open(base.anchor, directory_flags)
+        directory_parts = [*base.parts[1:], *relative.parts[:-1]]
+        for part in directory_parts:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+
+        descriptor = os.open(relative.name, file_flags, dir_fd=directory_fd)
+        with os.fdopen(descriptor, "rb") as stream:
+            before_stat = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before_stat.st_mode):
+                raise ValidationError(f"{location}.path: capture must be a regular file")
+            if before_stat.st_size != expected_bytes:
+                raise ValidationError(
+                    f"{location}.bytes: expected {expected_bytes}, found {before_stat.st_size} "
+                    f"for {relative}"
+                )
+            payload = stream.read(expected_bytes)
+            after_stat = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise ValidationError(f"{location}.path: cannot securely read capture {relative}: {exc}") from exc
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+    before_fingerprint = (
+        before_stat.st_dev,
+        before_stat.st_ino,
+        before_stat.st_size,
+        before_stat.st_mtime_ns,
+        before_stat.st_ctime_ns,
+    )
+    after_fingerprint = (
+        after_stat.st_dev,
+        after_stat.st_ino,
+        after_stat.st_size,
+        after_stat.st_mtime_ns,
+        after_stat.st_ctime_ns,
+    )
+    if before_fingerprint != after_fingerprint or len(payload) != after_stat.st_size:
+        raise ValidationError(f"{location}.path: capture changed while it was being read")
+    return payload, after_stat
+
+
+def _jpeg_dimensions(payload: bytes, display_name: str) -> tuple[int, int]:
+    """Validate JPEG marker structure and return dimensions from its frame header."""
+    if not payload.startswith(b"\xff\xd8"):
+        raise ValidationError(f"JPEG file {display_name!r}: missing start-of-image marker")
+
+    position = 2
+    dimensions: tuple[int, int] | None = None
+    frame_components: set[int] | None = None
+    scanned_components: set[int] = set()
+    saw_scan = False
+    pending_marker: int | None = None
+
+    def read_segment(marker: int) -> tuple[int, int]:
+        nonlocal position
+        if position + 2 > len(payload):
+            raise ValidationError(f"JPEG file {display_name!r}: truncated marker length")
+        segment_length = int.from_bytes(payload[position : position + 2], "big")
+        if segment_length < 2:
+            raise ValidationError(f"JPEG file {display_name!r}: invalid marker length")
+        start = position + 2
+        end = position + segment_length
+        if end > len(payload):
+            raise ValidationError(f"JPEG file {display_name!r}: truncated marker 0x{marker:02x}")
+        position = end
+        return start, end
+
+    while True:
+        if pending_marker is None:
+            if position >= len(payload):
+                suffix = "end-of-image marker" if saw_scan else "image scan and end-of-image marker"
+                raise ValidationError(f"JPEG file {display_name!r}: missing {suffix}")
+            if payload[position] != 0xFF:
+                raise ValidationError(f"JPEG file {display_name!r}: invalid marker stream")
+            while position < len(payload) and payload[position] == 0xFF:
+                position += 1
+            if position >= len(payload) or payload[position] == 0x00:
+                raise ValidationError(f"JPEG file {display_name!r}: invalid marker")
+            marker = payload[position]
+            position += 1
+        else:
+            marker = pending_marker
+            pending_marker = None
+
+        if marker == 0xD8:
+            raise ValidationError(f"JPEG file {display_name!r}: repeated start-of-image marker")
+        if marker == 0xD9:
+            if dimensions is None:
+                raise ValidationError(f"JPEG file {display_name!r}: ended before frame header")
+            if not saw_scan:
+                raise ValidationError(f"JPEG file {display_name!r}: ended before image scan")
+            if scanned_components != frame_components:
+                raise ValidationError(f"JPEG file {display_name!r}: image scans are missing frame components")
+            if position != len(payload):
+                raise ValidationError(f"JPEG file {display_name!r}: trailing data after end-of-image")
+            return dimensions
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            raise ValidationError(f"JPEG file {display_name!r}: standalone marker outside image scan")
+
+        if marker == 0xDA:
+            if dimensions is None:
+                raise ValidationError(f"JPEG file {display_name!r}: image scan begins before frame header")
+            start, end = read_segment(marker)
+            scan_components = payload[start] if start < end else 0
+            expected_length = 1 + (2 * scan_components) + 3
+            if scan_components == 0 or end - start != expected_length:
+                raise ValidationError(f"JPEG file {display_name!r}: invalid image scan header")
+            selectors = [payload[start + 1 + (2 * index)] for index in range(scan_components)]
+            if len(set(selectors)) != len(selectors) or not set(selectors).issubset(frame_components or set()):
+                raise ValidationError(f"JPEG file {display_name!r}: invalid scan component selector")
+            scanned_components.update(selectors)
+            spectral_start, spectral_end, approximation = payload[end - 3 : end]
+            if (spectral_start, spectral_end, approximation) != (0, 63, 0):
+                raise ValidationError(f"JPEG file {display_name!r}: invalid baseline scan parameters")
+            saw_scan = True
+
+            saw_entropy_data = False
+            while position < len(payload):
+                marker_start = payload.find(b"\xff", position)
+                if marker_start < 0:
+                    if position < len(payload):
+                        saw_entropy_data = True
+                    break
+                if marker_start > position:
+                    saw_entropy_data = True
+                position = marker_start + 1
+                while position < len(payload) and payload[position] == 0xFF:
+                    position += 1
+                if position >= len(payload):
+                    break
+                scan_marker = payload[position]
+                position += 1
+                if scan_marker == 0x00:
+                    saw_entropy_data = True
+                    continue
+                if 0xD0 <= scan_marker <= 0xD7:
+                    continue
+                pending_marker = scan_marker
+                break
+            if not saw_entropy_data:
+                raise ValidationError(f"JPEG file {display_name!r}: empty image scan")
+            if pending_marker is None:
+                raise ValidationError(f"JPEG file {display_name!r}: missing end-of-image marker")
+            continue
+
+        if marker not in SUPPORTED_SOF_MARKERS and marker not in ALLOWED_SEGMENT_MARKERS:
+            raise ValidationError(f"JPEG file {display_name!r}: unsupported marker 0x{marker:02x}")
+        start, end = read_segment(marker)
+        if marker not in SUPPORTED_SOF_MARKERS:
+            if marker == 0xDD and end - start != 2:
+                raise ValidationError(f"JPEG file {display_name!r}: invalid restart interval header")
+            continue
+        if dimensions is not None:
+            raise ValidationError(f"JPEG file {display_name!r}: duplicate frame header")
+        frame = payload[start:end]
+        if len(frame) < 6:
+            raise ValidationError(f"JPEG file {display_name!r}: truncated frame header")
+        if frame[0] != 8:
+            raise ValidationError(f"JPEG file {display_name!r}: baseline sample precision must be 8 bits")
+        height = int.from_bytes(frame[1:3], "big")
+        width = int.from_bytes(frame[3:5], "big")
+        component_count = frame[5]
+        if width == 0 or height == 0 or component_count == 0:
+            raise ValidationError(f"JPEG file {display_name!r}: invalid encoded dimensions")
+        if len(frame) != 6 + (3 * component_count):
+            raise ValidationError(f"JPEG file {display_name!r}: invalid component table length")
+        component_ids = {frame[6 + (3 * index)] for index in range(component_count)}
+        if len(component_ids) != component_count:
+            raise ValidationError(f"JPEG file {display_name!r}: duplicate frame component identifier")
+        block_count = 0
+        for index in range(component_count):
+            sampling = frame[7 + (3 * index)]
+            horizontal = sampling >> 4
+            vertical = sampling & 0x0F
+            quantization_table = frame[8 + (3 * index)]
+            if not (1 <= horizontal <= 4 and 1 <= vertical <= 4):
+                raise ValidationError(f"JPEG file {display_name!r}: invalid component sampling factor")
+            if quantization_table > 3:
+                raise ValidationError(f"JPEG file {display_name!r}: invalid quantization table selector")
+            block_count += horizontal * vertical
+        if block_count > 10:
+            raise ValidationError(f"JPEG file {display_name!r}: frame sampling factors exceed MCU limit")
+        dimensions = (width, height)
+        frame_components = component_ids
 
 
 def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> dict[str, Any]:
@@ -236,6 +440,8 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
 
     base = manifest_path.parent.resolve()
     seen_ids: set[str] = set()
+    seen_paths: dict[Path, str] = {}
+    seen_file_ids: dict[tuple[int, int], str] = {}
     counts: Counter[tuple[str, str]] = Counter()
     files_verified = 0
     for index, capture in enumerate(captures):
@@ -258,26 +464,47 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
         relative = Path(_require_text(capture, "path", location))
         if relative.is_absolute() or ".." in relative.parts:
             raise ValidationError(f"{location}.path: must stay beneath the manifest directory")
-        path = (base / relative).resolve()
-        if base not in path.parents:
-            raise ValidationError(f"{location}.path: escapes manifest directory")
-        if not path.is_file():
-            raise ValidationError(f"{location}.path: file does not exist: {relative}")
+        if relative in seen_paths:
+            raise ValidationError(
+                f"{location}.path: reuses capture file from {seen_paths[relative]!r}: {relative}"
+            )
+        seen_paths[relative] = capture_id
 
         expected_bytes = _require_integer(capture, "bytes", location, minimum=1)
-        if path.stat().st_size != expected_bytes:
+        if expected_bytes > MAX_CAPTURE_BYTES:
             raise ValidationError(
-                f"{location}.bytes: expected {expected_bytes}, found {path.stat().st_size} for {relative}"
+                f"{location}.bytes: {expected_bytes} exceeds maximum {MAX_CAPTURE_BYTES}"
+            )
+        payload, file_stat = _read_confined_capture(base, relative, location, expected_bytes)
+
+        file_id = (file_stat.st_dev, file_stat.st_ino)
+        if file_stat.st_ino and file_id in seen_file_ids:
+            raise ValidationError(
+                f"{location}.path: reuses physical capture file from "
+                f"{seen_file_ids[file_id]!r}: {relative}"
+            )
+        if file_stat.st_ino:
+            seen_file_ids[file_id] = capture_id
+
+        if len(payload) != expected_bytes:
+            raise ValidationError(
+                f"{location}.bytes: expected {expected_bytes}, found {len(payload)} for {relative}"
             )
         expected_sha = _require_text(capture, "sha256", location).lower()
         if len(expected_sha) != 64 or any(char not in "0123456789abcdef" for char in expected_sha):
             raise ValidationError(f"{location}.sha256: must be 64 lowercase hexadecimal characters")
-        actual_sha = _sha256(path)
+        actual_sha = hashlib.sha256(payload).hexdigest()
         if actual_sha != expected_sha:
             raise ValidationError(f"{location}.sha256: mismatch for {relative}")
 
         width_px = _require_integer(capture, "width_px", location, minimum=1)
         height_px = _require_integer(capture, "height_px", location, minimum=1)
+        encoded_width_px, encoded_height_px = _jpeg_dimensions(payload, relative.as_posix())
+        if (width_px, height_px) != (encoded_width_px, encoded_height_px):
+            raise ValidationError(
+                f"{location}: claimed dimensions {width_px}x{height_px} do not match "
+                f"encoded JPEG dimensions {encoded_width_px}x{encoded_height_px}"
+            )
         _require_number(
             capture, "latency_to_durable_file_ms", location, minimum=0, exclusive_minimum=True
         )
