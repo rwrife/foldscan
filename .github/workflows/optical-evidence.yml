@@ -37,7 +37,12 @@ jobs:
         run: python3 -m unittest discover -s hardware/optical-spike -p 'test_*.py' -v
 
       - name: Compile validator sources
-        run: python3 -m py_compile hardware/optical-spike/validate_manifest.py hardware/optical-spike/test_validate_manifest.py
+        run: >-
+          python3 -m py_compile
+          hardware/optical-spike/validate_manifest.py
+          hardware/optical-spike/summarize_manifest.py
+          hardware/optical-spike/test_validate_manifest.py
+          hardware/optical-spike/test_summarize_manifest.py
 
       - name: Validate collection template shape
         run: python3 hardware/optical-spike/validate_manifest.py hardware/optical-spike/manifest.example.json --allow-template
