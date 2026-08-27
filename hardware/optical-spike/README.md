@@ -132,7 +132,13 @@ Validate a real run:
 ```bash
 python3 hardware/optical-spike/validate_manifest.py \
   hardware/optical-spike/samples/<run-id>/manifest.json
+
+python3 hardware/optical-spike/summarize_manifest.py \
+  hardware/optical-spike/samples/<run-id>/manifest.json \
+  --output hardware/optical-spike/samples/<run-id>/summary.json
 ```
+
+The second command reruns the fail-closed validator before computing per-page latency, file-size, pixel-density, distortion, saturation, mechanical, power, and thermal summaries. It evaluates only the narrow numeric targets directly supported by manifest fields. Unsupported claims remain explicitly `not-evaluable` or `observed-no-threshold`, and `unresolved_evidence` lists the required manual/raw-evidence review. The summary never turns a template into bench evidence.
 
 The validator requires A4 and Letter captures, all primary conditions, 30 latency samples per page size, ten refold-cycle observations, power/thermal observations, existing unique JPEG files, integer byte/pixel counts, SHA-256 matches, and agreement between each manifest dimension claim and the JPEG frame header. Real bench manifests also require canonical UTC/commit provenance, positive measured dimensions/density/current/latency/sample-rate values, a thermal run of at least 30 minutes, bounded humidity and saturation fractions, usable crops no larger than their encoded images, and a combined-current peak no lower than any constituent peak. Template mode checks the complete collection shape but explicitly permits placeholders and zeroes.
 
