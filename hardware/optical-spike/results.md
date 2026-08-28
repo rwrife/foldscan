@@ -39,6 +39,7 @@ The omitted `lsusb` lines were USB root hubs. No Seeed/Espressif serial or camer
 - Mixed OV2640/OV3660 shipment risk identified; receipt inspection made mandatory.
 - Nominal pixel-density and documented-power calculations recorded and explicitly separated from measurement.
 - Reproducible A4 target, run manifest contract, fail-closed validator, and bench procedure added.
+- Manifest schema 1.1 requires confined, checksum-bound mechanical/current/temperature CSV logs and reproduces physical summary scalars from those rows. This is static evidence-integrity tooling, not a bench result.
 
 ### Open physical acceptance evidence
 

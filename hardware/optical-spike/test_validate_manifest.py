@@ -38,6 +38,8 @@ class ManifestValidationTests(unittest.TestCase):
     def _valid_manifest(self) -> dict:
         raw = self.root / "raw"
         raw.mkdir(exist_ok=True)
+        measurements = self.root / "measurements"
+        measurements.mkdir(exist_ok=True)
         captures = []
         minimums = {
             "symmetric-matte": 30,
@@ -79,8 +81,48 @@ class ManifestValidationTests(unittest.TestCase):
                             "exposure_settings": "gain=recorded; exposure=recorded; jpeg_quality=recorded",
                         }
                     )
+        mechanical_log = (
+            "measurement,cycle,x_mm,y_mm,elapsed_minutes,vertical_deflection_mm\n"
+            + "".join(
+                f"refold,{cycle},{cycle / 10},{-cycle / 20},,\n"
+                for cycle in range(1, 11)
+            )
+            + "deflection,,,,10,0.8\n"
+        )
+        current_log = (
+            "sample_index,elapsed_ms,state,current_ma\n"
+            "1,0,idle,50\n"
+            "2,1,capture,400\n"
+            "3,2,sd-write,180\n"
+            "4,3,usb-transfer,220\n"
+            "5,4,illumination,900\n"
+            "6,5,combined,1250\n"
+        )
+        temperature_log = (
+            "elapsed_minutes,location,temperature_c\n"
+            "0,module,23\n"
+            "0,diffuser,23\n"
+            "0,touchable,23\n"
+            "30,module,42\n"
+            "30,diffuser,36\n"
+            "30,touchable,38\n"
+        )
+        log_specs = {}
+        for role, filename, content in (
+            ("mechanical", "mechanical.csv", mechanical_log),
+            ("current", "current.csv", current_log),
+            ("temperature", "temperature.csv", temperature_log),
+        ):
+            payload = content.encode("utf-8")
+            (measurements / filename).write_bytes(payload)
+            log_specs[role] = {
+                "path": f"measurements/{filename}",
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+
         return {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "template": False,
             "evidence_category": "bench-test",
             "run_id": "20260824T120000Z-ov3660-spike",
@@ -112,6 +154,7 @@ class ManifestValidationTests(unittest.TestCase):
                 "relative_humidity_percent": 45,
             },
             "captures": captures,
+            "measurement_logs": log_specs,
             "mechanical": {
                 "refold_cycles": [
                     {"cycle": cycle, "x_mm": cycle / 10, "y_mm": -cycle / 20}
@@ -155,7 +198,76 @@ class ManifestValidationTests(unittest.TestCase):
         result = validate_manifest(path)
         self.assertEqual(result["kind"], "bench-test")
         self.assertEqual(result["captures"], 84)
-        self.assertEqual(result["files_verified"], 84)
+        self.assertEqual(result["capture_files_verified"], 84)
+        self.assertEqual(result["measurement_logs_verified"], 3)
+        self.assertEqual(result["files_verified"], 87)
+
+    def test_measurement_log_checksum_mismatch_fails(self) -> None:
+        data = self._valid_manifest()
+        data["measurement_logs"]["current"]["sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValidationError, "measurement_logs.current.sha256: mismatch"):
+            validate_manifest(self._write(data))
+
+    def test_current_claim_must_match_logged_samples(self) -> None:
+        data = self._valid_manifest()
+        data["power_and_thermal"]["capture_peak_current_ma"] = 399
+        with self.assertRaisesRegex(ValidationError, "capture_peak_current_ma.*logged maximum"):
+            validate_manifest(self._write(data))
+
+    def test_mechanical_claim_must_match_logged_observations(self) -> None:
+        data = self._valid_manifest()
+        data["mechanical"]["refold_cycles"][4]["x_mm"] = 99
+        with self.assertRaisesRegex(ValidationError, "refold_cycles\[4\].x_mm.*mechanical log"):
+            validate_manifest(self._write(data))
+
+    def test_temperature_claim_and_duration_must_match_log(self) -> None:
+        cases = (
+            ("module_temperature_c", 41, "logged maximum"),
+            ("test_duration_minutes", 31, "logged duration"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                data = self._valid_manifest()
+                data["power_and_thermal"][field] = value
+                with self.assertRaisesRegex(ValidationError, f"{field}.*{message}"):
+                    validate_manifest(self._write(data))
+
+    def test_measurement_log_header_is_strict(self) -> None:
+        data = self._valid_manifest()
+        path = self.root / data["measurement_logs"]["current"]["path"]
+        payload = path.read_bytes().replace(b"state,current_ma", b"mode,current_ma", 1)
+        path.write_bytes(payload)
+        data["measurement_logs"]["current"]["bytes"] = len(payload)
+        data["measurement_logs"]["current"]["sha256"] = hashlib.sha256(payload).hexdigest()
+        with self.assertRaisesRegex(ValidationError, "current CSV header"):
+            validate_manifest(self._write(data))
+
+    def test_measurement_log_rows_must_have_every_column(self) -> None:
+        data = self._valid_manifest()
+        path = self.root / data["measurement_logs"]["current"]["path"]
+        text = path.read_text(encoding="utf-8").replace("6,5,combined,1250", "6,5,combined")
+        payload = text.encode("utf-8")
+        path.write_bytes(payload)
+        data["measurement_logs"]["current"]["bytes"] = len(payload)
+        data["measurement_logs"]["current"]["sha256"] = hashlib.sha256(payload).hexdigest()
+        with self.assertRaisesRegex(ValidationError, "rows must match"):
+            validate_manifest(self._write(data))
+
+    def test_symlinked_measurement_log_is_rejected(self) -> None:
+        data = self._valid_manifest()
+        spec = data["measurement_logs"]["current"]
+        original = self.root / spec["path"]
+        alias = original.with_name("current-alias.csv")
+        alias.symlink_to(original)
+        spec["path"] = "measurements/current-alias.csv"
+        with self.assertRaisesRegex(ValidationError, "securely read measurement log"):
+            validate_manifest(self._write(data))
+
+    def test_current_sample_rate_must_match_logged_intervals(self) -> None:
+        data = self._valid_manifest()
+        data["power_and_thermal"]["current_sample_rate_hz"] = 500
+        with self.assertRaisesRegex(ValidationError, "current_sample_rate_hz.*median interval"):
+            validate_manifest(self._write(data))
 
     def test_checksum_mismatch_fails(self) -> None:
         data = self._valid_manifest()

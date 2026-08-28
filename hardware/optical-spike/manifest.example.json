@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "template": true,
   "evidence_category": "template-not-run",
   "run_id": "replace-with-utc-run-id",
@@ -32,6 +32,23 @@
     "relative_humidity_percent": 0
   },
   "captures": [],
+  "measurement_logs": {
+    "mechanical": {
+      "path": "measurements/mechanical.csv",
+      "bytes": 0,
+      "sha256": "replace-with-sha256"
+    },
+    "current": {
+      "path": "measurements/current.csv",
+      "bytes": 0,
+      "sha256": "replace-with-sha256"
+    },
+    "temperature": {
+      "path": "measurements/temperature.csv",
+      "bytes": 0,
+      "sha256": "replace-with-sha256"
+    }
+  },
   "mechanical": {
     "refold_cycles": [],
     "vertical_deflection_10min_mm": 0
