@@ -139,10 +139,13 @@ def summarize_manifest(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "evidence_category": data["evidence_category"],
         "run_id": data["run_id"],
         "captured_at_utc": data["captured_at_utc"],
+        "measurement_log_provenance": {
+            role: dict(spec) for role, spec in data["measurement_logs"].items()
+        },
         "measurements": {
             "page_sizes": page_sizes,
             "mechanical": mechanical,

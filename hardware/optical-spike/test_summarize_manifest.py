@@ -33,12 +33,20 @@ class ManifestSummaryTests(unittest.TestCase):
                     }
                 )
         return {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "template": False,
             "evidence_category": "bench-test",
             "run_id": "20260827T120000Z-test",
             "captured_at_utc": "2026-08-27T12:00:00Z",
             "captures": captures,
+            "measurement_logs": {
+                role: {
+                    "path": f"measurements/{role}.csv",
+                    "bytes": 123,
+                    "sha256": role[0] * 64,
+                }
+                for role in ("mechanical", "current", "temperature")
+            },
             "mechanical": {
                 "refold_cycles": [
                     {"cycle": cycle, "x_mm": cycle / 10, "y_mm": 0}
@@ -83,6 +91,11 @@ class ManifestSummaryTests(unittest.TestCase):
         power = summary["measurements"]["power_and_thermal"]
         self.assertEqual(power["combined_peak_current_ma"], 2500)
         self.assertEqual(power["max_touchable_temperature_c"], 42)
+
+        self.assertEqual(summary["schema_version"], "1.1")
+        self.assertEqual(
+            summary["measurement_log_provenance"], self._manifest()["measurement_logs"]
+        )
 
     def test_evaluates_only_requirements_supported_by_manifest_measurements(self) -> None:
         summary = summarize_manifest(self._manifest())

@@ -125,6 +125,42 @@ hardware/optical-spike/samples/<run-id>/
     revision-markings.jpg
 ```
 
+### Measurement-log contract (manifest schema 1.1)
+
+A real manifest must bind all three CSV logs under `measurement_logs`. Each entry contains a path relative to the manifest, the exact byte count, and a SHA-256 digest. The validator applies the same confined, no-symlink, stable-read policy used for captures, caps each log at 10 MiB, requires UTF-8, and rejects reused paths or hard links. The committed manifest is a metadata template only; its zero byte counts and placeholder hashes are not evidence.
+
+`measurements/mechanical.csv` uses this exact header:
+
+```csv
+measurement,cycle,x_mm,y_mm,elapsed_minutes,vertical_deflection_mm
+```
+
+- Add one `refold` row for each unique cycle 1 through 10. Populate `cycle`, `x_mm`, and `y_mm`; leave the deflection columns empty.
+- Add exactly one `deflection` row. Leave the refold columns empty and record `elapsed_minutes=10` plus the measured vertical deflection.
+- The manifest's ten cycle coordinates and `vertical_deflection_10min_mm` must exactly reproduce these rows.
+
+`measurements/current.csv` uses this exact header:
+
+```csv
+sample_index,elapsed_ms,state,current_ma
+```
+
+- Number samples sequentially from 1 and use strictly increasing elapsed milliseconds.
+- Record at least one sample for each state: `idle`, `capture`, `sd-write`, `usb-transfer`, `illumination`, and `combined`.
+- Each manifest current scalar is the maximum logged sample for its matching state. `current_sample_rate_hz` must be within 1% of `1000 / median(elapsed_ms interval)`; export enough contiguous samples that this median represents the instrument's real logging cadence rather than gaps between test phases.
+
+`measurements/temperature.csv` uses this exact header:
+
+```csv
+elapsed_minutes,location,temperature_c
+```
+
+- Record `module`, `diffuser`, and `touchable` locations.
+- Each manifest temperature scalar is the maximum logged value for its matching location.
+- `test_duration_minutes` must equal the greatest logged elapsed time and remains subject to the 30-minute minimum.
+
+The checksum and scalar comparisons establish that the reviewed manifest and summary refer to the preserved CSV bytes. They do not authenticate the operator, calibrate an instrument, prove probe placement, or prove that the physical measurements occurred; raw-log and setup-photo review remains mandatory.
+
 Large raw images may be attached to a GitHub release or durable artifact store instead of normal Git history, but the repository must retain the validated manifest, checksums, stable artifact URL, license/consent statement, and measurement summaries. Do not use expiring or private links as acceptance evidence.
 
 Validate a real run:
@@ -140,11 +176,11 @@ python3 hardware/optical-spike/summarize_manifest.py \
 
 The second command reruns the fail-closed validator before computing per-page latency, file-size, pixel-density, distortion, saturation, mechanical, power, and thermal summaries. It evaluates only the narrow numeric targets directly supported by manifest fields. Unsupported claims remain explicitly `not-evaluable` or `observed-no-threshold`, and `unresolved_evidence` lists the required manual/raw-evidence review. The summary never turns a template into bench evidence.
 
-The validator requires A4 and Letter captures, all primary conditions, 30 latency samples per page size, ten refold-cycle observations, power/thermal observations, existing unique JPEG files, integer byte/pixel counts, SHA-256 matches, and agreement between each manifest dimension claim and the JPEG frame header. Real bench manifests also require canonical UTC/commit provenance, positive measured dimensions/density/current/latency/sample-rate values, a thermal run of at least 30 minutes, bounded humidity and saturation fractions, usable crops no larger than their encoded images, and a combined-current peak no lower than any constituent peak. Template mode checks the complete collection shape but explicitly permits placeholders and zeroes.
+The validator requires A4 and Letter captures, all primary conditions, 30 latency samples per page size, ten refold-cycle observations, power/thermal observations, existing unique JPEG files, three checksum-bound measurement logs, integer byte/pixel counts, SHA-256 matches, and agreement between each manifest dimension claim and the JPEG frame header. Mechanical, current, sample-rate, temperature, and duration scalars must reproduce the CSV rows as described above. Real bench manifests also require canonical UTC/commit provenance, positive measured dimensions/density/current/latency/sample-rate values, a thermal run of at least 30 minutes, bounded humidity and saturation fractions, usable crops no larger than their encoded images, and a combined-current peak no lower than any constituent peak. Template mode checks the complete collection shape but explicitly permits placeholders and zeroes.
 
 For real-run files, the validator fails closed unless the host supports POSIX descriptor-relative opening with `O_NOFOLLOW`; the repository CI runs this path on Ubuntu. Capture paths may not traverse symlinks, and each declared file is capped at 50 MiB before reading. JPEG checks are intentionally limited to the expected 8-bit baseline DCT/SOF0 camera output: selected frame/scan/component/sampling/DRI invariants, non-empty entropy data, complete frame-component scan coverage, and terminal EOI are required.
 
-These checks establish metadata completeness, path safety, selected baseline-JPEG framing/header consistency, and file integrity from one stable bounded byte snapshot. They do not decode image pixels, validate every JPEG table/codec rule, or prove that measurements were taken correctly or that optical, timing, mechanical, electrical, or thermal acceptance thresholds passed; reviewers must inspect the raw evidence and compare measured results against `hardware/requirements.md`.
+These checks establish metadata completeness, path safety, selected baseline-JPEG framing/header consistency, measurement-log/scalar consistency, and file integrity from stable bounded byte snapshots. They do not decode image pixels, validate every JPEG table/codec rule, authenticate evidence, or prove that measurements were taken correctly or that optical, timing, mechanical, electrical, or thermal acceptance thresholds passed; reviewers must inspect the raw evidence and compare measured results against `hardware/requirements.md`.
 
 Validate the committed metadata template only:
 

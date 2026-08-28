@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import math
 import os
 import re
 import stat
+import statistics
 import sys
 from collections import Counter
 from datetime import datetime
@@ -27,6 +30,7 @@ CONDITION_MINIMUMS = {
 SUPPORTED_SOF_MARKERS = {0xC0}
 ALLOWED_SEGMENT_MARKERS = {0xC4, 0xDB, 0xDD, 0xFE, *range(0xE0, 0xF0)}
 MAX_CAPTURE_BYTES = 50 * 1024 * 1024
+MAX_MEASUREMENT_LOG_BYTES = 10 * 1024 * 1024
 PLACEHOLDER_WORDS = {"", "unknown", "tbd", "not measured", "not-measured", "n/a", "none"}
 TEMPLATE_SHAPE = {
     "run_id": str,
@@ -60,6 +64,11 @@ TEMPLATE_SHAPE = {
     "mechanical": {
         "refold_cycles": list,
         "vertical_deflection_10min_mm": "number",
+    },
+    "measurement_logs": {
+        "mechanical": {"path": str, "bytes": int, "sha256": str},
+        "current": {"path": str, "bytes": int, "sha256": str},
+        "temperature": {"path": str, "bytes": int, "sha256": str},
     },
     "power_and_thermal": {
         "idle_current_ma": "number",
@@ -163,8 +172,8 @@ def _require_template_shape(
             raise ValidationError(f"{field_location}: template value must be {expected.__name__}")
 
 
-def _read_confined_capture(
-    base: Path, relative: Path, location: str, expected_bytes: int
+def _read_confined_file(
+    base: Path, relative: Path, location: str, expected_bytes: int, *, kind: str
 ) -> tuple[bytes, os.stat_result]:
     """Read a regular file through a no-symlink descriptor walk rooted at / on POSIX."""
     if (
@@ -174,7 +183,7 @@ def _read_confined_capture(
         or not hasattr(os, "O_NOFOLLOW")
     ):
         raise ValidationError(
-            f"{location}.path: platform cannot securely read capture without symlink traversal"
+            f"{location}.path: platform cannot securely read {kind} without symlink traversal"
         )
 
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -192,7 +201,7 @@ def _read_confined_capture(
         with os.fdopen(descriptor, "rb") as stream:
             before_stat = os.fstat(stream.fileno())
             if not stat.S_ISREG(before_stat.st_mode):
-                raise ValidationError(f"{location}.path: capture must be a regular file")
+                raise ValidationError(f"{location}.path: {kind} must be a regular file")
             if before_stat.st_size != expected_bytes:
                 raise ValidationError(
                     f"{location}.bytes: expected {expected_bytes}, found {before_stat.st_size} "
@@ -201,7 +210,7 @@ def _read_confined_capture(
             payload = stream.read(expected_bytes)
             after_stat = os.fstat(stream.fileno())
     except OSError as exc:
-        raise ValidationError(f"{location}.path: cannot securely read capture {relative}: {exc}") from exc
+        raise ValidationError(f"{location}.path: cannot securely read {kind} {relative}: {exc}") from exc
     finally:
         if directory_fd >= 0:
             os.close(directory_fd)
@@ -221,8 +230,255 @@ def _read_confined_capture(
         after_stat.st_ctime_ns,
     )
     if before_fingerprint != after_fingerprint or len(payload) != after_stat.st_size:
-        raise ValidationError(f"{location}.path: capture changed while it was being read")
+        raise ValidationError(f"{location}.path: {kind} changed while it was being read")
     return payload, after_stat
+
+
+def _require_sha256(mapping: dict[str, Any], key: str, location: str) -> str:
+    value = _require_text(mapping, key, location).lower()
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValidationError(f"{location}.{key}: must be 64 lowercase hexadecimal characters")
+    return value
+
+
+def _parse_csv_number(value: str, location: str, *, minimum: float | None = None) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValidationError(f"{location}: must be a finite number") from exc
+    if not math.isfinite(number):
+        raise ValidationError(f"{location}: must be a finite number")
+    if minimum is not None and number < minimum:
+        raise ValidationError(f"{location}: must be >= {minimum}")
+    return number
+
+
+def _csv_rows(payload: bytes, role: str, expected_header: tuple[str, ...]) -> list[dict[str, str]]:
+    location = f"measurement_logs.{role}"
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError(f"{location}: must be UTF-8 CSV") from exc
+    if "\x00" in text:
+        raise ValidationError(f"{location}: CSV must not contain NUL bytes")
+    try:
+        reader = csv.DictReader(io.StringIO(text, newline=""))
+        if tuple(reader.fieldnames or ()) != expected_header:
+            raise ValidationError(
+                f"{location}: {role} CSV header must equal {','.join(expected_header)}"
+            )
+        rows = list(reader)
+    except csv.Error as exc:
+        raise ValidationError(f"{location}: invalid CSV: {exc}") from exc
+    if not rows:
+        raise ValidationError(f"{location}: CSV must contain measurement rows")
+    if any(None in row or any(value is None for value in row.values()) for row in rows):
+        raise ValidationError(f"{location}: CSV rows must match the declared header")
+    return [{key: value.strip() for key, value in row.items()} for row in rows]
+
+
+def _assert_logged_number(claimed: float, logged: float, location: str, source: str) -> None:
+    if not math.isclose(claimed, logged, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValidationError(f"{location}: {claimed} does not match {source} {logged}")
+
+
+def _validate_measurement_logs(
+    base: Path,
+    logs: Any,
+    mechanical: dict[str, Any],
+    power: dict[str, Any],
+    seen_paths: dict[Path, str],
+    seen_file_ids: dict[tuple[int, int], str],
+) -> int:
+    required_roles = {"mechanical", "current", "temperature"}
+    if not isinstance(logs, dict) or set(logs) != required_roles:
+        raise ValidationError(
+            "manifest.measurement_logs must contain exactly mechanical, current, and temperature"
+        )
+
+    payloads: dict[str, bytes] = {}
+    for role in ("mechanical", "current", "temperature"):
+        location = f"measurement_logs.{role}"
+        spec = logs[role]
+        if not isinstance(spec, dict):
+            raise ValidationError(f"{location}: must be an object")
+        relative = Path(_require_text(spec, "path", location))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValidationError(f"{location}.path: must stay beneath the manifest directory")
+        if relative in seen_paths:
+            raise ValidationError(
+                f"{location}.path: reuses evidence file from {seen_paths[relative]!r}: {relative}"
+            )
+        expected_bytes = _require_integer(spec, "bytes", location, minimum=1)
+        if expected_bytes > MAX_MEASUREMENT_LOG_BYTES:
+            raise ValidationError(
+                f"{location}.bytes: {expected_bytes} exceeds maximum {MAX_MEASUREMENT_LOG_BYTES}"
+            )
+        payload, file_stat = _read_confined_file(
+            base, relative, location, expected_bytes, kind="measurement log"
+        )
+        file_id = (file_stat.st_dev, file_stat.st_ino)
+        if file_stat.st_ino and file_id in seen_file_ids:
+            raise ValidationError(
+                f"{location}.path: reuses physical evidence file from "
+                f"{seen_file_ids[file_id]!r}: {relative}"
+            )
+        expected_sha = _require_sha256(spec, "sha256", location)
+        if hashlib.sha256(payload).hexdigest() != expected_sha:
+            raise ValidationError(f"{location}.sha256: mismatch for {relative}")
+        seen_paths[relative] = location
+        if file_stat.st_ino:
+            seen_file_ids[file_id] = location
+        payloads[role] = payload
+
+    _validate_mechanical_log(payloads["mechanical"], mechanical)
+    _validate_current_log(payloads["current"], power)
+    _validate_temperature_log(payloads["temperature"], power)
+    return len(payloads)
+
+
+def _validate_mechanical_log(payload: bytes, mechanical: dict[str, Any]) -> None:
+    rows = _csv_rows(
+        payload,
+        "mechanical",
+        ("measurement", "cycle", "x_mm", "y_mm", "elapsed_minutes", "vertical_deflection_mm"),
+    )
+    logged_cycles: dict[int, tuple[float, float]] = {}
+    logged_deflection: float | None = None
+    for row_index, row in enumerate(rows, start=2):
+        location = f"measurement_logs.mechanical row {row_index}"
+        if row["measurement"] == "refold":
+            if row["elapsed_minutes"] or row["vertical_deflection_mm"]:
+                raise ValidationError(f"{location}: refold rows cannot contain deflection fields")
+            try:
+                cycle = int(row["cycle"])
+            except ValueError as exc:
+                raise ValidationError(f"{location}.cycle: must be an integer") from exc
+            if str(cycle) != row["cycle"] or cycle not in range(1, 11) or cycle in logged_cycles:
+                raise ValidationError(f"{location}.cycle: must be a unique integer from 1 through 10")
+            logged_cycles[cycle] = (
+                _parse_csv_number(row["x_mm"], f"{location}.x_mm"),
+                _parse_csv_number(row["y_mm"], f"{location}.y_mm"),
+            )
+        elif row["measurement"] == "deflection":
+            if any(row[field] for field in ("cycle", "x_mm", "y_mm")):
+                raise ValidationError(f"{location}: deflection row cannot contain refold fields")
+            if logged_deflection is not None:
+                raise ValidationError("measurement_logs.mechanical: requires exactly one deflection row")
+            elapsed = _parse_csv_number(row["elapsed_minutes"], f"{location}.elapsed_minutes", minimum=0)
+            _assert_logged_number(elapsed, 10.0, f"{location}.elapsed_minutes", "required interval")
+            logged_deflection = _parse_csv_number(
+                row["vertical_deflection_mm"], f"{location}.vertical_deflection_mm", minimum=0
+            )
+        else:
+            raise ValidationError(f"{location}.measurement: expected refold or deflection")
+    if set(logged_cycles) != set(range(1, 11)) or logged_deflection is None:
+        raise ValidationError(
+            "measurement_logs.mechanical: requires refold cycles 1 through 10 and one deflection row"
+        )
+    for index, claim in enumerate(mechanical["refold_cycles"]):
+        logged_x, logged_y = logged_cycles[index + 1]
+        _assert_logged_number(
+            float(claim["x_mm"]), logged_x, f"mechanical.refold_cycles[{index}].x_mm", "mechanical log"
+        )
+        _assert_logged_number(
+            float(claim["y_mm"]), logged_y, f"mechanical.refold_cycles[{index}].y_mm", "mechanical log"
+        )
+    _assert_logged_number(
+        float(mechanical["vertical_deflection_10min_mm"]),
+        logged_deflection,
+        "mechanical.vertical_deflection_10min_mm",
+        "mechanical log",
+    )
+
+
+def _validate_current_log(payload: bytes, power: dict[str, Any]) -> None:
+    rows = _csv_rows(payload, "current", ("sample_index", "elapsed_ms", "state", "current_ma"))
+    state_to_field = {
+        "idle": "idle_current_ma",
+        "capture": "capture_peak_current_ma",
+        "sd-write": "sd_write_peak_current_ma",
+        "usb-transfer": "usb_transfer_peak_current_ma",
+        "illumination": "illumination_current_ma",
+        "combined": "combined_peak_current_ma",
+    }
+    samples: dict[str, list[float]] = {state: [] for state in state_to_field}
+    elapsed_values: list[float] = []
+    for row_index, row in enumerate(rows, start=2):
+        location = f"measurement_logs.current row {row_index}"
+        try:
+            sample_index = int(row["sample_index"])
+        except ValueError as exc:
+            raise ValidationError(f"{location}.sample_index: must be an integer") from exc
+        if str(sample_index) != row["sample_index"] or sample_index != row_index - 1:
+            raise ValidationError(f"{location}.sample_index: must be sequential from 1")
+        elapsed = _parse_csv_number(row["elapsed_ms"], f"{location}.elapsed_ms", minimum=0)
+        if elapsed_values and elapsed <= elapsed_values[-1]:
+            raise ValidationError(f"{location}.elapsed_ms: must increase strictly")
+        elapsed_values.append(elapsed)
+        state = row["state"]
+        if state not in samples:
+            raise ValidationError(f"{location}.state: unsupported {state!r}")
+        samples[state].append(
+            _parse_csv_number(row["current_ma"], f"{location}.current_ma", minimum=0)
+        )
+    for state, field in state_to_field.items():
+        if not samples[state]:
+            raise ValidationError(f"measurement_logs.current: missing {state!r} samples")
+        _assert_logged_number(
+            float(power[field]), max(samples[state]), f"power_and_thermal.{field}", "logged maximum"
+        )
+    intervals = [right - left for left, right in zip(elapsed_values, elapsed_values[1:])]
+    if not intervals:
+        raise ValidationError("measurement_logs.current: requires at least two timed samples")
+    logged_sample_rate_hz = 1000.0 / statistics.median(intervals)
+    if not math.isclose(
+        float(power["current_sample_rate_hz"]),
+        logged_sample_rate_hz,
+        rel_tol=0.01,
+        abs_tol=0.01,
+    ):
+        raise ValidationError(
+            "power_and_thermal.current_sample_rate_hz: does not match logged median interval "
+            f"({logged_sample_rate_hz} Hz) within 1%"
+        )
+
+
+def _validate_temperature_log(payload: bytes, power: dict[str, Any]) -> None:
+    rows = _csv_rows(payload, "temperature", ("elapsed_minutes", "location", "temperature_c"))
+    location_to_field = {
+        "module": "module_temperature_c",
+        "diffuser": "diffuser_temperature_c",
+        "touchable": "max_touchable_temperature_c",
+    }
+    temperatures: dict[str, list[float]] = {location: [] for location in location_to_field}
+    elapsed_minutes: list[float] = []
+    for row_index, row in enumerate(rows, start=2):
+        location = f"measurement_logs.temperature row {row_index}"
+        elapsed_minutes.append(
+            _parse_csv_number(row["elapsed_minutes"], f"{location}.elapsed_minutes", minimum=0)
+        )
+        location_name = row["location"]
+        if location_name not in temperatures:
+            raise ValidationError(f"{location}.location: unsupported {location_name!r}")
+        temperatures[location_name].append(
+            _parse_csv_number(row["temperature_c"], f"{location}.temperature_c")
+        )
+    for location_name, field in location_to_field.items():
+        if not temperatures[location_name]:
+            raise ValidationError(f"measurement_logs.temperature: missing {location_name!r} samples")
+        _assert_logged_number(
+            float(power[field]),
+            max(temperatures[location_name]),
+            f"power_and_thermal.{field}",
+            "logged maximum",
+        )
+    _assert_logged_number(
+        float(power["test_duration_minutes"]),
+        max(elapsed_minutes),
+        "power_and_thermal.test_duration_minutes",
+        "logged duration",
+    )
 
 
 def _jpeg_dimensions(payload: bytes, display_name: str) -> tuple[int, int]:
@@ -378,8 +634,8 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
 
     if not isinstance(data, dict):
         raise ValidationError("manifest root must be an object")
-    if data.get("schema_version") != "1.0":
-        raise ValidationError("schema_version must equal '1.0'")
+    if data.get("schema_version") != "1.1":
+        raise ValidationError("schema_version must equal '1.1'")
 
     if data.get("template") is True:
         if not allow_template:
@@ -475,7 +731,9 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
             raise ValidationError(
                 f"{location}.bytes: {expected_bytes} exceeds maximum {MAX_CAPTURE_BYTES}"
             )
-        payload, file_stat = _read_confined_capture(base, relative, location, expected_bytes)
+        payload, file_stat = _read_confined_file(
+            base, relative, location, expected_bytes, kind="capture"
+        )
 
         file_id = (file_stat.st_dev, file_stat.st_ino)
         if file_stat.st_ino and file_id in seen_file_ids:
@@ -490,9 +748,7 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
             raise ValidationError(
                 f"{location}.bytes: expected {expected_bytes}, found {len(payload)} for {relative}"
             )
-        expected_sha = _require_text(capture, "sha256", location).lower()
-        if len(expected_sha) != 64 or any(char not in "0123456789abcdef" for char in expected_sha):
-            raise ValidationError(f"{location}.sha256: must be 64 lowercase hexadecimal characters")
+        expected_sha = _require_sha256(capture, "sha256", location)
         actual_sha = hashlib.sha256(payload).hexdigest()
         if actual_sha != expected_sha:
             raise ValidationError(f"{location}.sha256: mismatch for {relative}")
@@ -587,10 +843,21 @@ def validate_manifest(manifest_path: Path, *, allow_template: bool = False) -> d
     _require_number(power, "test_duration_minutes", "power_and_thermal", minimum=30)
     _require_text(power, "instrument", "power_and_thermal")
 
+    measurement_logs_verified = _validate_measurement_logs(
+        base,
+        _require(data, "measurement_logs", "manifest"),
+        mechanical,
+        power,
+        seen_paths,
+        seen_file_ids,
+    )
+
     return {
         "kind": "bench-test",
         "captures": len(captures),
-        "files_verified": files_verified,
+        "capture_files_verified": files_verified,
+        "measurement_logs_verified": measurement_logs_verified,
+        "files_verified": files_verified + measurement_logs_verified,
         "counts": {f"{page}/{condition}": counts[(page, condition)] for page in sorted(PAGE_SIZES) for condition in CONDITION_MINIMUMS},
     }
 
