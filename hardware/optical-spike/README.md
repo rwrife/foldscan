@@ -189,6 +189,27 @@ python3 hardware/optical-spike/validate_manifest.py \
   hardware/optical-spike/manifest.example.json --allow-template
 ```
 
+## Host bench-readiness probe
+
+Use this probe to capture deterministic host inventory evidence when a physical
+run is blocked or before connecting hardware. It records USB inventory,
+device-node visibility, and key tooling (`lsusb`, camera tooling, and ESP-IDF
+utilities) in either JSON or Markdown.
+
+```bash
+# JSON report
+python3 hardware/optical-spike/probe_bench_environment.py
+
+# Markdown report for issue/PR comments
+python3 hardware/optical-spike/probe_bench_environment.py --markdown
+
+# CI/automation gate: exit non-zero when bench requirements are missing
+python3 hardware/optical-spike/probe_bench_environment.py --require-ready
+```
+
+This probe is an inventory/evidence artifact only. It does **not** prove optical,
+mechanical, electrical, thermal, or field acceptance by itself.
+
 ## Decision rule
 
 - **GO:** both page sizes frame with margins; measured focus/readability is acceptable for the explicitly documented use cases; timing, stability, power, and thermal targets pass; raw evidence is reproducible.

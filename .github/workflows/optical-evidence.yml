@@ -41,8 +41,10 @@ jobs:
           python3 -m py_compile
           hardware/optical-spike/validate_manifest.py
           hardware/optical-spike/summarize_manifest.py
+          hardware/optical-spike/probe_bench_environment.py
           hardware/optical-spike/test_validate_manifest.py
           hardware/optical-spike/test_summarize_manifest.py
+          hardware/optical-spike/test_probe_bench_environment.py
 
       - name: Validate collection template shape
         run: python3 hardware/optical-spike/validate_manifest.py hardware/optical-spike/manifest.example.json --allow-template

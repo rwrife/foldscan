@@ -32,6 +32,22 @@ $ list /dev/ttyACM* /dev/ttyUSB*
 
 The omitted `lsusb` lines were USB root hubs. No Seeed/Espressif serial or camera device was visible. This evidence only establishes why a bench run was not performed in this automation environment; it is not a test of the module.
 
+### Host inventory evidence (automated probe, 2026-09-05)
+
+```text
+$ python3 hardware/optical-spike/probe_bench_environment.py --markdown
+# FoldScan bench readiness probe (2026-09-05T21:23:27Z)
+
+- Bench ready: no
+- Device nodes: no /dev/video*, /dev/media*, /dev/ttyACM*, or /dev/ttyUSB*
+- USB candidates: none matching Seeed/Espressif keywords
+- Tooling snapshot: lsusb available, v4l2-ctl/libcamera/rpicam unavailable,
+  esptool.py/esptool/idf.py unavailable
+```
+
+This probe is deterministic host-inventory evidence only; it does not replace a physical
+capture run or bench instrumentation.
+
 ### Completed evidence
 
 - Exact candidate bundle identified as Seeed Studio SKU/MPN 113991115.
