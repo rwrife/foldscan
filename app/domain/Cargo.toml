@@ -1,0 +1,15 @@
+[package]
+name = "foldscan-domain"
+version = "0.1.0"
+edition = "2021"
+description = "FoldScan local-first import/validation domain core (device and session manifests, path safety, checksums, bounded import)"
+license = "MIT"
+
+[dependencies]
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.141"
+sha2 = "=0.10.9"
+thiserror = "=1.0.69"
+
+[dev-dependencies]
+tempfile = "=3.20.0"

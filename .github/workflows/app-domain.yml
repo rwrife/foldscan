@@ -1,0 +1,55 @@
+name: App domain tests
+
+on:
+  pull_request:
+    paths:
+      - "app/domain/**"
+      - ".github/workflows/app-domain.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "app/domain/**"
+      - ".github/workflows/app-domain.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-domain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build, lint, and test foldscan-domain
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/domain/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('app/domain/Cargo.lock') }}
+
+      - name: Format check
+        working-directory: app/domain
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        working-directory: app/domain
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        working-directory: app/domain
+        run: cargo test --locked

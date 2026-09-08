@@ -56,4 +56,23 @@ Acceptance includes keyboard-only workflows, logical focus order, visible focus,
 
 ## Current status
 
-No app project, build, test result, package, scan pipeline, OCR model/language data, or supported installer exists yet.
+No Tauri shell, UI, processing pipeline, OCR model/language data, or supported
+installer exists yet.
+
+Implemented so far (issue #5, first domain slice): `app/domain` — a pinned Rust
+crate with the import-side domain core: protocol/schema version negotiation,
+bounded input validation before allocation, canonical relative-path safety for
+untrusted device files, SHA-256 capture verification, duplicate-ID rejection
+(within and across sessions), and a read-only `FOLDSCAN/` removable-media
+import pipeline. Verified by 28 unit/fixture tests plus a clean `clippy
+-D warnings` pass in CI (`.github/workflows/app-domain.yml`). All evidence is
+mocked/software fixture evidence; no physical device integration has occurred.
+
+## Verification
+
+```bash
+cd app/domain
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+```
