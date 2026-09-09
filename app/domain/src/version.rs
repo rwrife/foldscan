@@ -39,18 +39,31 @@ impl ProtocolVersion {
 
 /// Parse and validate a session `schema` tag such as `foldscan.session/0.1`.
 pub fn parse_session_schema(schema: &str) -> Result<ProtocolVersion, DomainError> {
+    parse_tag_version(SESSION_SCHEMA_PREFIX, schema, "session schema")
+}
+
+/// Parse and validate a `<prefix><major>.<minor>` schema tag such as
+/// `foldscan.recipe/0.1` or `foldscan.export/0.1`.
+///
+/// Unknown *major* versions map to `UnsupportedVersion` (fail safely);
+/// malformed tags map to `InvalidRequest` (structural violation).
+pub fn parse_tag_version(
+    prefix: &str,
+    schema: &str,
+    label: &str,
+) -> Result<ProtocolVersion, DomainError> {
     let rest = schema
-        .strip_prefix(SESSION_SCHEMA_PREFIX)
-        .ok_or_else(|| DomainError::invalid_request("session schema tag has unknown prefix"))?;
+        .strip_prefix(prefix)
+        .ok_or_else(|| DomainError::invalid_request(format!("{} tag has unknown prefix", label)))?;
     let (major_s, minor_s) = rest.split_once('.').ok_or_else(|| {
-        DomainError::invalid_request("session schema tag is missing a minor component")
+        DomainError::invalid_request(format!("{} tag is missing a minor component", label))
     })?;
     let major = major_s
         .parse::<u32>()
-        .map_err(|_| DomainError::invalid_request("session schema major is not a number"))?;
+        .map_err(|_| DomainError::invalid_request(format!("{} major is not a number", label)))?;
     let minor = minor_s
         .parse::<u32>()
-        .map_err(|_| DomainError::invalid_request("session schema minor is not a number"))?;
+        .map_err(|_| DomainError::invalid_request(format!("{} minor is not a number", label)))?;
     let v = ProtocolVersion { major, minor };
     v.validate()?;
     Ok(v)
