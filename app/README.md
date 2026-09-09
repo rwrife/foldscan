@@ -59,14 +59,21 @@ Acceptance includes keyboard-only workflows, logical focus order, visible focus,
 No Tauri shell, UI, processing pipeline, OCR model/language data, or supported
 installer exists yet.
 
-Implemented so far (issue #5, first domain slice): `app/domain` — a pinned Rust
-crate with the import-side domain core: protocol/schema version negotiation,
-bounded input validation before allocation, canonical relative-path safety for
-untrusted device files, SHA-256 capture verification, duplicate-ID rejection
-(within and across sessions), and a read-only `FOLDSCAN/` removable-media
-import pipeline. Verified by 28 unit/fixture tests plus a clean `clippy
--D warnings` pass in CI (`.github/workflows/app-domain.yml`). All evidence is
-mocked/software fixture evidence; no physical device integration has occurred.
+Implemented so far (issue #5, second domain slice): `app/domain` now also
+carries the export-side domain core: versioned `foldscan.recipe/0.1`
+processing-recipe documents with a closed operation vocabulary (rotate/crop/
+perspective/illumination/dewarp), per-recipe content digests, the
+originals/derivatives page model with reorder and remove-from-export-without-
+delete, a collision-checked export layout planner (writes nothing), and a
+versioned portable export manifest (`foldscan.export/0.1`) with order-
+sensitive integrity digests and path-safety validation on re-import. Together
+with the first slice (protocol version negotiation, bounded input validation,
+canonical relative-path safety, SHA-256 capture verification, duplicate-ID
+rejection, read-only `FOLDSCAN/` import), the crate is verified by 54 unit/
+fixture tests plus a clean `clippy -D warnings` pass in CI
+(`.github/workflows/app-domain.yml`). All evidence is mocked/software fixture
+evidence; no physical device integration has occurred and no image encoding,
+PDF writing, or filesystem export execution happens yet.
 
 ## Verification
 
