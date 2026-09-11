@@ -13,13 +13,16 @@
 //! - originals/derivatives export modeling, reorder/remove-without-delete,
 //!   collision-checked export layout planning, and a versioned portable
 //!   export manifest (`foldscan.export/0.1`) with order-sensitive integrity
-//!   digests.
+//!   digests;
+//! - a filesystem export executor that materializes a validated plan under
+//!   temporary-write/verify/finalize semantics and writes the manifest last.
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
 
 pub mod checksum;
 pub mod error;
+pub mod executor;
 pub mod export;
 pub mod import;
 pub mod limits;
