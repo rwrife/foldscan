@@ -26,11 +26,17 @@
 //!   export tree, leaving no partially finalized export and no `.part`
 //!   leftovers to confuse a later run.
 //!
+//! In-memory content: a processed derivative exists in host memory first
+//! (the [`crate::processing::Processor`] output, once a host codec encodes
+//! it), so [`ExportSource::Bytes`] lets the executor stage those bytes
+//! directly under the same staged/verify/finalize discipline; originals keep
+//! arriving as host file paths because they must be re-read from the import,
+//! never re-encoded from a buffer.
+//!
 //! Known limitations (later slices): one session per export run (multi-session
-//! export layout is not finalized in the planner yet); content arrives as
-//! source file paths only (in-memory derivative buffers are a later need);
-//! parent-directory fsync is not attempted, matching the host-side durability
-//! bar the protocol states for rename-capable filesystems.
+//! export layout is not finalized in the planner yet); parent-directory fsync
+//! is not attempted, matching the host-side durability bar the protocol
+//! states for rename-capable filesystems.
 //!
 //! Evidence category: filesystem code exercised on synthetic fixtures in a
 //! temporary directory. No physical device or optical-hardware evidence.
@@ -59,6 +65,48 @@ pub const PART_SUFFIX: &str = ".foldscan-part";
 /// Size of the streaming copy buffer for source files.
 const COPY_BUF_BYTES: usize = 64 * 1024;
 
+/// Where the executor should read one planned content file's bytes from.
+///
+/// Originals arrive as [`ExportSource::File`] so they are re-read from the
+/// verified import; processed derivatives typically arrive as
+/// [`ExportSource::Bytes`] straight from the processing pipeline (host codec
+/// output) without ever touching an intermediate host file. Both variants
+/// pass the same declared-size, checksum, and read-back gates before an
+/// atomic rename — the source variant never weakens finalization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportSource {
+    /// Bytes live in a host file (typical for originals).
+    File(PathBuf),
+    /// Bytes live in memory (typical for freshly processed derivatives).
+    Bytes(Vec<u8>),
+}
+
+impl ExportSource {
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self::File(path.into())
+    }
+
+    pub fn bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::Bytes(bytes.into())
+    }
+
+    /// The backing host path, if this source is file-backed.
+    pub fn as_file_path(&self) -> Option<&Path> {
+        match self {
+            Self::File(p) => Some(p),
+            Self::Bytes(_) => None,
+        }
+    }
+
+    /// The in-memory payload, if this source is byte-backed.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Bytes(b) => Some(b),
+            Self::File(_) => None,
+        }
+    }
+}
+
 /// Summary of one successfully executed export.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportExecution {
@@ -76,8 +124,10 @@ pub struct ExportExecution {
 /// [`ExportManifest`] under `root`.
 ///
 /// `sources` maps each planned *original* and *derivative* relative path to
-/// the host file holding its bytes. Recipe documents are serialized from the
-/// plan itself; the manifest document is written last from `manifest`.
+/// an [`ExportSource`]: originals must be file-backed (re-read from the
+/// verified import), derivatives may be file-backed or in-memory bytes from
+/// the processing pipeline. Recipe documents are serialized from the plan
+/// itself; the manifest document is written last from `manifest`.
 ///
 /// The executor refuses to write if `root` already exists, if a source is
 /// missing or declared-size/checksum-mismatched, or if a source is supplied
@@ -86,7 +136,7 @@ pub struct ExportExecution {
 pub fn execute_export(
     plan: &ExportPlan,
     root: &Path,
-    sources: &HashMap<String, PathBuf>,
+    sources: &HashMap<String, ExportSource>,
     manifest: &ExportManifest,
 ) -> Result<ExportExecution, DomainError> {
     let session = validate_request_shape(plan, manifest, sources)?;
@@ -136,7 +186,7 @@ pub fn execute_export(
 fn validate_request_shape<'a>(
     plan: &'a ExportPlan,
     manifest: &ExportManifest,
-    sources: &HashMap<String, PathBuf>,
+    sources: &HashMap<String, ExportSource>,
 ) -> Result<&'a ExportSession, DomainError> {
     if plan.sessions.len() != 1 {
         return Err(DomainError::invalid_request(
@@ -206,9 +256,17 @@ fn validate_request_shape<'a>(
                 "content file without capture_id in plan",
             ));
         }
-        if !sources.contains_key(&f.relative_path) {
-            return Err(DomainError::invalid_request(format!(
+        let source = sources.get(&f.relative_path).ok_or_else(|| {
+            DomainError::invalid_request(format!(
                 "missing export source for planned file: {}",
+                f.relative_path
+            ))
+        })?;
+        // Originals are preserved, immutable content: they must be re-read
+        // from the verified import file, never re-encoded from a buffer.
+        if f.content_kind == ContentKind::Original && source.as_file_path().is_none() {
+            return Err(DomainError::invalid_request(format!(
+                "original source must be file-backed: {}",
                 f.relative_path
             )));
         }
@@ -220,7 +278,7 @@ fn run_plan(
     plan: &ExportPlan,
     session: &ExportSession,
     root: &Path,
-    sources: &HashMap<String, PathBuf>,
+    sources: &HashMap<String, ExportSource>,
     manifest: &ExportManifest,
 ) -> Result<ExportExecution, DomainError> {
     let mut files_written = 0usize;
@@ -231,13 +289,14 @@ fn run_plan(
             ContentKind::Original => {
                 let page = page_for(session, file)?;
                 let source = source_for(sources, file)?;
-                copy_source_verified(
-                    root,
-                    file,
-                    source,
-                    &page.original_sha256,
-                    page.original_bytes,
-                )?;
+                // validate_request_shape already enforced file-backing for
+                // originals; the pattern match keeps that invariant local.
+                let ExportSource::File(path) = source else {
+                    return Err(DomainError::internal(
+                        "original source lost its file backing after validation",
+                    ));
+                };
+                copy_file_verified(root, file, path, &page.original_sha256, page.original_bytes)?;
             }
             ContentKind::Derivative => {
                 let page = page_for(session, file)?;
@@ -248,8 +307,12 @@ fn run_plan(
                         "derivative page lacks declared checksum or size",
                     ));
                 };
-                let source = source_for(sources, file)?;
-                copy_source_verified(root, file, source, sha, bytes)?;
+                match source_for(sources, file)? {
+                    ExportSource::File(path) => copy_file_verified(root, file, path, sha, bytes)?,
+                    ExportSource::Bytes(payload) => {
+                        write_bytes_verified(root, file, payload, sha, bytes)?
+                    }
+                }
             }
             ContentKind::Recipe => {
                 let bytes = recipe_document(plan, file)?;
@@ -303,24 +366,21 @@ fn page_for<'a>(
 }
 
 fn source_for<'a>(
-    sources: &'a HashMap<String, PathBuf>,
+    sources: &'a HashMap<String, ExportSource>,
     file: &PlannedFile,
-) -> Result<&'a Path, DomainError> {
-    sources
-        .get(&file.relative_path)
-        .map(|p| p.as_path())
-        .ok_or_else(|| {
-            DomainError::invalid_request(format!(
-                "missing export source for planned file: {}",
-                file.relative_path
-            ))
-        })
+) -> Result<&'a ExportSource, DomainError> {
+    sources.get(&file.relative_path).ok_or_else(|| {
+        DomainError::invalid_request(format!(
+            "missing export source for planned file: {}",
+            file.relative_path
+        ))
+    })
 }
 
 /// Copy `source` to the file's final planned location through a staged
 /// temporary name, verifying declared size, live-stream checksum, and
 /// read-back checksum before the atomic rename.
-fn copy_source_verified(
+fn copy_file_verified(
     root: &Path,
     file: &PlannedFile,
     source: &Path,
@@ -405,6 +465,52 @@ fn copy_source_verified(
         return Err(DomainError::checksum_mismatch(format!(
             "export source checksum does not match the plan: {}",
             file.relative_path
+        )));
+    }
+    if let Err(e) = verify_staged(&staged_path, want_sha, want_bytes) {
+        let _ = fs::remove_file(&staged_path);
+        return Err(e);
+    }
+    finalize_staged(root, file, &staged_path)
+}
+
+/// Stage in-memory `payload` (a processed derivative) to the file's planned
+/// location. Same gates as the file-backed path: the payload's declared
+/// bytes and checksum are checked against the plan *before* anything is
+/// written, the staged copy is flushed, re-read from disk, and re-verified,
+/// and only then renamed into place.
+fn write_bytes_verified(
+    root: &Path,
+    file: &PlannedFile,
+    payload: &[u8],
+    want_sha: &str,
+    want_bytes: u64,
+) -> Result<(), DomainError> {
+    if payload.len() as u64 != want_bytes {
+        return Err(DomainError::checksum_mismatch(format!(
+            "export source {} carries {} bytes in memory but the plan declares {}",
+            file.relative_path,
+            payload.len(),
+            want_bytes
+        )));
+    }
+    if sha256_hex(payload) != want_sha {
+        return Err(DomainError::checksum_mismatch(format!(
+            "export source checksum does not match the plan: {}",
+            file.relative_path
+        )));
+    }
+    let (mut staged, staged_path) = create_staged(root, file)?;
+    let write = staged
+        .write_all(payload)
+        .and_then(|()| staged.flush())
+        .and_then(|()| staged.sync_all());
+    drop(staged);
+    if let Err(e) = write {
+        let _ = fs::remove_file(&staged_path);
+        return Err(DomainError::storage_unavailable(format!(
+            "cannot write staged export: {}",
+            kind_of(&e)
         )));
     }
     if let Err(e) = verify_staged(&staged_path, want_sha, want_bytes) {
