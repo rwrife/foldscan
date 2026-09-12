@@ -1,6 +1,8 @@
 //! End-to-end fixture for the filesystem export executor: import a synthetic
 //! volume, review pages, bind a recipe, plan the layout, then materialize the
-//! export on disk and verify finalize/rollback/no-overwrite behavior.
+//! export on disk and verify finalize/rollback/no-overwrite behavior — with
+//! originals file-backed and derivatives arriving either as host files or as
+//! in-memory bytes straight from the processing pipeline.
 //!
 //! Evidence category: software fixture test on synthetic data in a temporary
 //! directory. No physical device, no image encoding, no PDF writing.
@@ -10,15 +12,15 @@ use std::path::Path;
 
 use foldscan_domain::checksum::{is_lowercase_hex_sha256, sha256_hex};
 use foldscan_domain::error::Category;
-use foldscan_domain::executor::{execute_export, ExportExecution, PART_SUFFIX};
+use foldscan_domain::executor::{execute_export, ExportExecution, ExportSource, PART_SUFFIX};
 use foldscan_domain::{
-    export_sessions_from_import, import_volume, plan_export, remove_from, reorder, ExportManifest,
-    ExportPage, OpKind, ProcessingRecipe, RecipeOp,
+    export_sessions_from_import, import_volume, plan_export, remove_from, reorder,
+    DeterministicProcessor, ExportManifest, ExportPage, GrayFrame, OpKind, ProcessingRecipe,
+    Processor, RecipeOp,
 };
 use tempfile::TempDir;
 
 const FAKE_JPEG: &[u8] = b"\xFF\xD8\xFF\xE0synthetic-page-image\xFF\xD9";
-const FAKE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nsynthetic-derivative-bytes";
 
 /// Build a valid volume with one session holding captures with the given ids.
 fn build_volume(root: &Path, capture_ids: &[&str]) {
@@ -55,15 +57,18 @@ fn build_volume(root: &Path, capture_ids: &[&str]) {
     .unwrap();
 }
 
-/// Import, review (reorder + remove), bind a recipe to the first page, and
-/// produce a plan plus materialization sources. The first page's derivative
-/// bytes are written into `host` so sources can reference real files.
+/// Import, review (reorder + remove), run a real processing pass on a
+/// synthetic frame, and bind its output to the first page. Returns a plan
+/// plus materialization sources: originals are file-backed host files, the
+/// derivative is in-memory bytes straight from `DeterministicProcessor`
+/// (the shape a host codec will hand the exporter).
 fn reviewed_plan(
     host: &Path,
 ) -> (
     foldscan_domain::ExportPlan,
     ExportManifest,
-    HashMap<String, std::path::PathBuf>,
+    HashMap<String, ExportSource>,
+    Vec<u8>,
 ) {
     let vol = host.join("volume");
     std::fs::create_dir_all(&vol).unwrap();
@@ -90,18 +95,32 @@ fn reviewed_plan(
         ],
     };
     recipe.validate().expect("recipe valid");
-    let d = recipe.digest();
+
+    // Real processing run: the derivative payload is the processor's frame
+    // bytes (a host codec would encode these later; here the raw frame stands
+    // in for codec output, which does not change the executor contract).
+    let source_frame =
+        GrayFrame::from_pixels(4, 4, (0..16u8).map(|i| i.saturating_mul(16)).collect())
+            .expect("source frame");
+    let processed = DeterministicProcessor
+        .process(&source_frame, &recipe)
+        .expect("process");
+    let derivative_bytes = processed.frame.pixels.clone();
+
     let first: &mut ExportPage = &mut s.pages[0];
     first.processed_media_type = Some("image/png".to_string());
-    first.processed_sha256 = Some(sha256_hex(FAKE_PNG));
-    first.processed_bytes = Some(FAKE_PNG.len() as u64);
-    first.recipe_digest = Some(d);
+    first.processed_sha256 = Some(sha256_hex(&derivative_bytes));
+    first.processed_bytes = Some(derivative_bytes.len() as u64);
+    // recipe_digest binds the recipe document the plan carries (the frame
+    // digest lives inside processed_sha256's payload instead).
+    first.recipe_digest = Some(recipe.digest());
 
     let plan = plan_export(&sessions, std::slice::from_ref(&recipe)).expect("plan");
     let manifest = ExportManifest::from_plan(&plan, &sessions[0].session_id).expect("manifest");
 
-    // Materialize host files for originals + the derivative. Distinct host
-    // names per planned path so an original and its derivative never collide.
+    // Originals are host files (distinct names per planned path so an
+    // original and its derivative never share a host file). The derivative
+    // arrives as in-memory bytes.
     let mut sources = HashMap::new();
     for f in &plan.files {
         match f.content_kind {
@@ -111,20 +130,18 @@ fn reviewed_plan(
                     f.capture_id.as_deref().unwrap_or("x")
                 ));
                 std::fs::write(&src, FAKE_JPEG).unwrap();
-                sources.insert(f.relative_path.clone(), src);
+                sources.insert(f.relative_path.clone(), ExportSource::file(src));
             }
             foldscan_domain::ContentKind::Derivative => {
-                let src = host.join(format!(
-                    "src-deriv-{}",
-                    f.capture_id.as_deref().unwrap_or("x")
-                ));
-                std::fs::write(&src, FAKE_PNG).unwrap();
-                sources.insert(f.relative_path.clone(), src);
+                sources.insert(
+                    f.relative_path.clone(),
+                    ExportSource::bytes(derivative_bytes.clone()),
+                );
             }
             _ => {}
         }
     }
-    (plan, manifest, sources)
+    (plan, manifest, sources, derivative_bytes)
 }
 
 fn walk_files(base: &Path, dir: &Path, out: &mut Vec<String>) {
@@ -146,7 +163,7 @@ fn walk_files(base: &Path, dir: &Path, out: &mut Vec<String>) {
 #[test]
 fn executes_plan_to_finalized_export_tree() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
+    let (plan, manifest, sources, derivative_bytes) = reviewed_plan(host.path());
     let root = host.path().join("out/export");
 
     let exec: ExportExecution =
@@ -170,7 +187,8 @@ fn executes_plan_to_finalized_export_tree() {
                 assert_eq!(sha256_hex(&bytes), sha256_hex(FAKE_JPEG));
             }
             foldscan_domain::ContentKind::Derivative => {
-                assert_eq!(sha256_hex(&bytes), sha256_hex(FAKE_PNG));
+                assert_eq!(sha256_hex(&bytes), sha256_hex(&derivative_bytes));
+                assert_eq!(bytes, derivative_bytes, "derivative bytes are exact");
             }
             _ => {}
         }
@@ -192,7 +210,7 @@ fn executes_plan_to_finalized_export_tree() {
 #[test]
 fn refuses_to_overwrite_existing_root() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
     let root = host.path().join("out2/export");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("keep.txt"), b"do not touch").unwrap();
@@ -209,7 +227,7 @@ fn refuses_to_overwrite_existing_root() {
 #[test]
 fn checksum_mismatch_rolls_back_whole_tree() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
     // Corrupt one original source after the plan recorded its checksum.
     let orig = plan
         .files
@@ -217,7 +235,10 @@ fn checksum_mismatch_rolls_back_whole_tree() {
         .find(|f| f.content_kind == foldscan_domain::ContentKind::Original)
         .unwrap();
     std::fs::write(
-        sources.get(&orig.relative_path).unwrap(),
+        sources
+            .get(&orig.relative_path)
+            .and_then(|s| s.as_file_path())
+            .unwrap(),
         b"tampered-bytes-longer",
     )
     .unwrap();
@@ -231,7 +252,7 @@ fn checksum_mismatch_rolls_back_whole_tree() {
 #[test]
 fn declared_size_mismatch_is_rejected_before_copy() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
     let orig = plan
         .files
         .iter()
@@ -239,7 +260,10 @@ fn declared_size_mismatch_is_rejected_before_copy() {
         .unwrap();
     // A short file fails the declared-size gate before any bytes are copied.
     std::fs::write(
-        sources.get(&orig.relative_path).unwrap(),
+        sources
+            .get(&orig.relative_path)
+            .and_then(|s| s.as_file_path())
+            .unwrap(),
         &FAKE_JPEG[..FAKE_JPEG.len() - 3],
     )
     .unwrap();
@@ -252,10 +276,110 @@ fn declared_size_mismatch_is_rejected_before_copy() {
 }
 
 #[test]
+fn memory_source_size_mismatch_is_rejected_before_write() {
+    let host = TempDir::new().unwrap();
+    let (plan, manifest, mut sources, derivative_bytes) = reviewed_plan(host.path());
+    // The plan declares the real derivative size; hand the executor a short
+    // buffer instead. The gate must reject it before any staging begins.
+    let deriv = plan
+        .files
+        .iter()
+        .find(|f| f.content_kind == foldscan_domain::ContentKind::Derivative)
+        .unwrap()
+        .relative_path
+        .clone();
+    let mut short = derivative_bytes.clone();
+    short.truncate(short.len() - 1);
+    sources.insert(deriv, ExportSource::bytes(short));
+
+    let root = host.path().join("out-mem-size/export");
+    let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+    assert_eq!(err.category, Category::ChecksumMismatch);
+    assert!(err
+        .message
+        .contains("bytes in memory but the plan declares"));
+    assert!(!root.exists());
+}
+
+#[test]
+fn memory_source_checksum_mismatch_is_rejected_before_write() {
+    let host = TempDir::new().unwrap();
+    let (plan, manifest, mut sources, derivative_bytes) = reviewed_plan(host.path());
+    // Same length as declared, but flipped bytes: the declared-size gate
+    // passes and the checksum gate must catch the tampering before staging.
+    let deriv = plan
+        .files
+        .iter()
+        .find(|f| f.content_kind == foldscan_domain::ContentKind::Derivative)
+        .unwrap()
+        .relative_path
+        .clone();
+    let mut tampered = derivative_bytes.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xFF;
+    sources.insert(deriv, ExportSource::bytes(tampered));
+
+    let root = host.path().join("out-mem-sum/export");
+    let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+    assert_eq!(err.category, Category::ChecksumMismatch);
+    assert!(err.message.contains("checksum does not match the plan"));
+    assert!(!root.exists(), "no partial export may survive the gate");
+}
+
+#[test]
+fn file_backed_derivative_still_supported() {
+    let host = TempDir::new().unwrap();
+    let (plan, manifest, mut sources, derivative_bytes) = reviewed_plan(host.path());
+    // Swap the in-memory derivative for a host file holding the same bytes:
+    // the finalized tree must be identical to the bytes-backed path.
+    let deriv = plan
+        .files
+        .iter()
+        .find(|f| f.content_kind == foldscan_domain::ContentKind::Derivative)
+        .unwrap()
+        .relative_path
+        .clone();
+    let src = host.path().join("src-deriv-file");
+    std::fs::write(&src, &derivative_bytes).unwrap();
+    sources.insert(deriv.clone(), ExportSource::file(&src));
+
+    let root = host.path().join("out-file-deriv/export");
+    let exec = execute_export(&plan, &root, &sources, &manifest).expect("executes");
+    assert_eq!(exec.files_written, plan.files.len());
+    assert_eq!(
+        std::fs::read(root.join(&deriv)).unwrap(),
+        derivative_bytes,
+        "file-backed derivative finalizes to the same bytes"
+    );
+}
+
+#[test]
+fn byte_backed_original_is_rejected_without_creating_root() {
+    let host = TempDir::new().unwrap();
+    let (plan, manifest, mut sources, _) = reviewed_plan(host.path());
+    // Originals must be re-read from the verified import — an in-memory
+    // buffer standing in for one is rejected before the root exists.
+    let orig = plan
+        .files
+        .iter()
+        .find(|f| f.content_kind == foldscan_domain::ContentKind::Original)
+        .unwrap()
+        .relative_path
+        .clone();
+    sources.insert(orig, ExportSource::bytes(FAKE_JPEG.to_vec()));
+
+    let root = host.path().join("out-orig-bytes/export");
+    let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+    assert_eq!(err.category, Category::InvalidRequest);
+    assert!(err.message.contains("original source must be file-backed"));
+    assert!(!root.exists());
+}
+
+#[test]
 fn missing_source_is_rejected_without_creating_root() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
-    let mut partial: HashMap<String, std::path::PathBuf> = sources
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
+    let mut partial: HashMap<String, ExportSource> = sources
         .iter()
         .filter(|(path, _)| !path.starts_with("originals/"))
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -274,10 +398,13 @@ fn missing_source_is_rejected_without_creating_root() {
 #[test]
 fn unplanned_source_is_rejected() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, mut sources) = reviewed_plan(host.path());
+    let (plan, manifest, mut sources, _) = reviewed_plan(host.path());
     let smuggle = host.path().join("smuggle.jpg");
     std::fs::write(&smuggle, FAKE_JPEG).unwrap();
-    sources.insert("originals/sess-001/extra.jpg".to_string(), smuggle);
+    sources.insert(
+        "originals/sess-001/extra.jpg".to_string(),
+        ExportSource::file(smuggle),
+    );
 
     let root = host.path().join("out6/export");
     let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
@@ -289,7 +416,7 @@ fn unplanned_source_is_rejected() {
 #[test]
 fn session_mismatch_between_manifest_and_plan_is_rejected() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
     let mut shifted = plan.clone();
     shifted.sessions[0].session_id = "sess-999".to_string();
 
@@ -302,7 +429,7 @@ fn session_mismatch_between_manifest_and_plan_is_rejected() {
 #[test]
 fn finalized_tree_contains_no_staged_part_files() {
     let host = TempDir::new().unwrap();
-    let (plan, manifest, sources) = reviewed_plan(host.path());
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
     let root = host.path().join("out8/export");
     execute_export(&plan, &root, &sources, &manifest).expect("executes");
 

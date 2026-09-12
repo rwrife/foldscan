@@ -15,7 +15,9 @@
 //!   export manifest (`foldscan.export/0.1`) with order-sensitive integrity
 //!   digests;
 //! - a filesystem export executor that materializes a validated plan under
-//!   temporary-write/verify/finalize semantics and writes the manifest last;
+//!   temporary-write/verify/finalize semantics and writes the manifest last,
+//!   accepting originals as file-backed sources and processed derivatives as
+//!   either host files or in-memory bytes from the processing pipeline;
 //! - a deterministic grayscale processing core behind a `Processor`
 //!   interface (rotation, strict crop, bilinear quadrilateral rectification,
 //!   fixed-point illumination correction) whose output is bit-stable across
