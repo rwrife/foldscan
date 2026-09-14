@@ -208,6 +208,188 @@ fn executes_plan_to_finalized_export_tree() {
 }
 
 #[test]
+fn stale_manifest_is_rejected_before_any_directory_creation() {
+    let host = TempDir::new().unwrap();
+    let (plan, mut manifest, sources, _) = reviewed_plan(host.path());
+    manifest.pages.reverse();
+    manifest
+        .validate()
+        .expect("stale manifest is individually valid");
+    let root = host.path().join("must-not-exist/export");
+
+    let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+    assert_eq!(err.category, Category::InvalidRequest);
+    assert!(err.message.contains("manifest does not match"));
+    assert!(!root.parent().unwrap().exists());
+    for source in sources.values().filter_map(ExportSource::as_file_path) {
+        assert_eq!(std::fs::read(source).unwrap(), FAKE_JPEG);
+    }
+}
+
+#[test]
+fn omitted_recipe_is_rejected_before_any_directory_creation() {
+    let host = TempDir::new().unwrap();
+    let (mut plan, manifest, sources, _) = reviewed_plan(host.path());
+    plan.files
+        .retain(|f| f.content_kind != foldscan_domain::ContentKind::Recipe);
+    let root = host.path().join("must-not-exist/export");
+
+    let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+    assert_eq!(err.category, Category::InvalidRequest);
+    assert!(err.message.contains("layout does not match"));
+    assert!(!root.parent().unwrap().exists());
+}
+
+/// Every manifest field must agree with the plan, not merely be well-formed.
+#[test]
+fn independently_valid_manifest_mutations_are_rejected() {
+    for case in [
+        "missing_page",
+        "extra_page",
+        "capture_id",
+        "original_path",
+        "original_sha256",
+        "original_bytes",
+        "processed_path",
+        "processed_sha256",
+        "processed_bytes",
+        "recipe_digest",
+        "removed_derivative",
+        "added_derivative",
+    ] {
+        let host = TempDir::new().unwrap();
+        let (plan, mut manifest, sources, _) = reviewed_plan(host.path());
+        match case {
+            "missing_page" => {
+                manifest.pages.pop();
+            }
+            "extra_page" => {
+                let mut page = manifest.pages[1].clone();
+                page.capture_id = "extra".into();
+                page.original_path = "originals/sess-001/extra.jpg".into();
+                manifest.pages.push(page);
+            }
+            "capture_id" => manifest.pages[0].capture_id = "other".into(),
+            "original_path" => manifest.pages[0].original_path = "originals/other.jpg".into(),
+            "original_sha256" => manifest.pages[0].original_sha256 = sha256_hex(b"other"),
+            "original_bytes" => manifest.pages[0].original_bytes += 1,
+            "processed_path" => {
+                manifest.pages[0].processed_path = Some("processed/other.png".into())
+            }
+            "processed_sha256" => manifest.pages[0].processed_sha256 = Some(sha256_hex(b"other")),
+            "processed_bytes" => manifest.pages[0].processed_bytes = Some(1),
+            "recipe_digest" => manifest.pages[0].recipe_digest = Some(sha256_hex(b"other")),
+            "removed_derivative" => {
+                manifest.pages[0].processed_path = None;
+                manifest.pages[0].processed_sha256 = None;
+                manifest.pages[0].processed_bytes = None;
+                manifest.pages[0].recipe_digest = None;
+            }
+            "added_derivative" => {
+                manifest.pages[1].processed_path = Some("processed/extra.png".into());
+                manifest.pages[1].processed_sha256 = Some(sha256_hex(b"other"));
+                manifest.pages[1].processed_bytes = Some(5);
+                manifest.pages[1].recipe_digest = manifest.pages[0].recipe_digest.clone();
+            }
+            _ => unreachable!(),
+        }
+        manifest
+            .validate()
+            .expect("mutation remains individually valid");
+        let root = host.path().join("must-not-exist/export");
+        let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+        assert_eq!(err.category, Category::InvalidRequest, "{case}");
+        assert!(
+            err.message.contains("manifest does not match"),
+            "{case}: {err:?}"
+        );
+        assert!(!root.parent().unwrap().exists(), "{case}");
+        for source in sources.values().filter_map(ExportSource::as_file_path) {
+            assert_eq!(std::fs::read(source).unwrap(), FAKE_JPEG, "{case}");
+        }
+    }
+}
+
+/// A self-consistent manifest cannot authorize an edited public file layout.
+#[test]
+fn noncanonical_layout_mutations_are_rejected() {
+    use foldscan_domain::ContentKind;
+    for case in [
+        "missing_original",
+        "missing_derivative",
+        "missing_manifest",
+        "extra_file",
+        "duplicate_file",
+        "relocated_manifest",
+        "relocated_original",
+        "changed_kind",
+        "changed_capture",
+        "manifest_capture",
+        "reordered_content",
+        "manifest_first",
+    ] {
+        let host = TempDir::new().unwrap();
+        let (mut plan, mut manifest, mut sources, _) = reviewed_plan(host.path());
+        match case {
+            "missing_original" => {
+                let removed = plan.files.remove(0);
+                sources.remove(&removed.relative_path);
+            }
+            "missing_derivative" => {
+                let index = plan
+                    .files
+                    .iter()
+                    .position(|f| f.content_kind == ContentKind::Derivative)
+                    .unwrap();
+                let removed = plan.files.remove(index);
+                sources.remove(&removed.relative_path);
+            }
+            "missing_manifest" => {
+                plan.files.pop();
+            }
+            "extra_file" | "duplicate_file" => {
+                let mut extra = plan.files[0].clone();
+                if case == "extra_file" {
+                    let source = sources[&extra.relative_path].clone();
+                    extra.relative_path = "originals/extra.jpg".into();
+                    sources.insert(extra.relative_path.clone(), source);
+                }
+                plan.files.insert(1, extra);
+            }
+            "relocated_manifest" => {
+                plan.files.last_mut().unwrap().relative_path = "other.json".into()
+            }
+            "relocated_original" => {
+                let original = &mut plan.files[0];
+                let source = sources.remove(&original.relative_path).unwrap();
+                original.relative_path = "originals/other.jpg".into();
+                sources.insert(original.relative_path.clone(), source);
+                // Even matching edits to all three caller-supplied arguments
+                // must not bypass canonical planner paths.
+                manifest.pages[0].original_path = original.relative_path.clone();
+            }
+            "changed_kind" => plan.files[0].content_kind = ContentKind::Derivative,
+            "changed_capture" => plan.files[0].capture_id = Some("p1".into()),
+            "manifest_capture" => plan.files.last_mut().unwrap().capture_id = Some("p3".into()),
+            "reordered_content" => plan.files.swap(0, 1),
+            "manifest_first" => plan.files.rotate_right(1),
+            _ => unreachable!(),
+        }
+        let root = host.path().join("must-not-exist/export");
+        let err = execute_export(&plan, &root, &sources, &manifest).unwrap_err();
+        assert_eq!(err.category, Category::InvalidRequest, "{case}");
+        assert!(
+            err.message.contains("layout does not match"),
+            "{case}: {err:?}"
+        );
+        assert!(!root.parent().unwrap().exists(), "{case}");
+        for source in sources.values().filter_map(ExportSource::as_file_path) {
+            assert_eq!(std::fs::read(source).unwrap(), FAKE_JPEG, "{case}");
+        }
+    }
+}
+
+#[test]
 fn refuses_to_overwrite_existing_root() {
     let host = TempDir::new().unwrap();
     let (plan, manifest, sources, _) = reviewed_plan(host.path());
