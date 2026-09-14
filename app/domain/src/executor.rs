@@ -15,6 +15,10 @@
 //!   Sources supplied for unplanned paths are rejected before any disk
 //!   mutation, so an executor call cannot smuggle extra files into a
 //!   reviewed export.
+//! - **Plan/manifest consistency**: public plan fields are rechecked against
+//!   the canonical planner layout, and the supplied manifest must exactly
+//!   match the plan-derived document (including schema and page order).
+//!   Mismatches fail before creating even the export's parent directories.
 //! - **Declared-bytes verification**: each original/derivative source file
 //!   is rejected unless its size matches the plan's declared size *before*
 //!   being read, and its streamed SHA-256 matches the checksum the plan
@@ -201,17 +205,20 @@ fn validate_request_shape<'a>(
     }
     manifest.validate()?;
 
-    // Planner invariant: exactly one manifest entry, planned last.
-    let manifest_count = plan
-        .files
-        .iter()
-        .filter(|f| f.content_kind == ContentKind::Manifest)
-        .count();
-    if manifest_count != 1
-        || plan.files.last().map(|f| f.content_kind) != Some(ContentKind::Manifest)
-    {
+    // ExportPlan has public fields: a caller can mutate the planner's result.
+    // Rebuild its layout before trusting paths, file kinds, capture bindings,
+    // recipe coverage, or manifest-last ordering. No filesystem mutation has
+    // occurred yet, including creation of the export's parent directories.
+    let canonical = crate::export::plan_export(&plan.sessions, &plan.recipes)?;
+    if plan.files != canonical.files {
         return Err(DomainError::invalid_request(
-            "export plan must list exactly one manifest file and it must be planned last",
+            "export plan layout does not match the canonical content plan",
+        ));
+    }
+    let expected_manifest = ExportManifest::from_plan(&canonical, &session.session_id)?;
+    if *manifest != expected_manifest {
+        return Err(DomainError::invalid_request(
+            "export manifest does not match the export plan",
         ));
     }
 

@@ -59,7 +59,7 @@ Acceptance includes keyboard-only workflows, logical focus order, visible focus,
 No Tauri shell, UI, image codec integration, OCR model/language data, or
 supported installer exists yet.
 
-Implemented so far (issue #5, four domain slices in `app/domain`):
+Implemented so far (issue #5, domain work in `app/domain`):
 
 1. Import core: protocol version negotiation, bounded input validation
    before allocation, canonical relative-path safety, SHA-256 capture
@@ -85,8 +85,16 @@ Implemented so far (issue #5, four domain slices in `app/domain`):
    degenerate quadrilaterals are rejected with stable error categories
    rather than garbled output.
 
-The crate is verified by 95 unit/fixture tests plus a clean
-`clippy -D warnings` pass in CI (`.github/workflows/app-domain.yml`). All
+5. In-memory derivative export: processed bytes use the same checksum,
+   read-back, and finalization gates as file-backed content; originals remain
+   file-backed. Executor preflight also binds the public file layout and
+   manifest to the canonical content plan, rejecting stale or edited
+   combinations before creating directories. See the
+   [export-integrity evidence](domain/evidence/export-integrity.md).
+
+The crate is verified by 103 unit/fixture tests plus a clean
+`clippy -D warnings` pass locally; CI runs the same gates
+(`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no image encode/decode, no physical
 device integration, and no optical-bench measurement has occurred. JPEG/PNG
 codec integration, corner detection, dewarp, PDF export, OCR, and the UI
