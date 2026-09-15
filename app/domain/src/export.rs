@@ -54,6 +54,8 @@ pub struct ExportPage {
     /// Original media type as declared by the device (e.g. `image/jpeg`).
     pub media_type: String,
     /// Declared export media type of the derivative (e.g. `image/png`).
+    /// Omitted means PNG only when the other derivative fields are complete;
+    /// original-only pages must omit all derivative fields.
     pub processed_media_type: Option<String>,
     /// Lowercase-hex SHA-256 of the original bytes (verified at import).
     pub original_sha256: String,
@@ -216,6 +218,12 @@ pub fn plan_export(
                         page.capture_id, digest
                     )));
                 }
+                let bytes = page.processed_bytes.ok_or_else(|| {
+                    DomainError::invalid_request(
+                        "derivative metadata requires a declared byte count",
+                    )
+                })?;
+                validate_processed_bytes(bytes)?;
                 let pmtype = page.processed_media_type.as_deref().unwrap_or("image/png");
                 let proc = format!(
                     "{}/{}/{}.{}",
@@ -231,6 +239,13 @@ pub fn plan_export(
                     Some(&page.capture_id),
                     ContentKind::Derivative,
                 )?;
+            } else if page.processed_media_type.is_some()
+                || page.processed_bytes.is_some()
+                || page.recipe_digest.is_some()
+            {
+                return Err(DomainError::invalid_request(
+                    "original-only page must not carry derivative metadata",
+                ));
             }
         }
     }
@@ -324,6 +339,15 @@ fn ext_for(media_type: &str) -> Result<&'static str, DomainError> {
             other
         ))),
     }
+}
+
+fn validate_processed_bytes(bytes: u64) -> Result<(), DomainError> {
+    if bytes > MAX_CAPTURE_BYTES {
+        return Err(DomainError::invalid_request(
+            "derivative byte count exceeds the per-file limit",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_checksum(label: &str, sum: &str) -> Result<(), DomainError> {
@@ -427,6 +451,8 @@ impl ExportManifest {
     }
 
     /// Validate a parsed export manifest (bounds, checksum shapes, paths).
+    /// Processed path/checksum/byte count/recipe digest are all-or-none.
+    /// This validates metadata, not encoded media or recipe file contents.
     pub fn validate(&self) -> Result<ProtocolVersion, DomainError> {
         let version = parse_tag_version(EXPORT_SCHEMA_PREFIX, &self.schema, "export schema")?;
         sanitize_segment(&self.session_id)?;
@@ -452,8 +478,27 @@ impl ExportManifest {
                 )));
             }
             validate_checksum("original sha256", &page.original_sha256)?;
+            let derivative_fields = [
+                page.processed_path.is_some(),
+                page.processed_sha256.is_some(),
+                page.processed_bytes.is_some(),
+                page.recipe_digest.is_some(),
+            ];
+            if derivative_fields.iter().any(|present| *present)
+                && !derivative_fields.iter().all(|present| *present)
+            {
+                return Err(DomainError::invalid_request(
+                    "derivative path, checksum, byte count, and recipe digest must be present together",
+                ));
+            }
             if let Some(sum) = &page.processed_sha256 {
                 validate_checksum("processed sha256", sum)?;
+            }
+            if let Some(digest) = &page.recipe_digest {
+                validate_checksum("recipe digest", digest)?;
+            }
+            if let Some(bytes) = page.processed_bytes {
+                validate_processed_bytes(bytes)?;
             }
             if page.original_bytes > MAX_CAPTURE_BYTES {
                 return Err(DomainError::invalid_request(format!(

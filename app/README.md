@@ -92,7 +92,16 @@ Implemented so far (issue #5, domain work in `app/domain`):
    combinations before creating directories. See the
    [export-integrity evidence](domain/evidence/export-integrity.md).
 
-The crate is verified by 103 unit/fixture tests plus a clean
+6. Derivative metadata preflight: original-only pages cannot carry orphan
+   processed fields. Derivatives require checksum, byte count (at most 64 MiB),
+   and a digest referencing a supplied recipe; omitted processed media type
+   continues to mean PNG. Portable manifests require processed path, checksum,
+   byte count, and recipe digest together or all absent, with lowercase SHA-256
+   shapes. Invalid records fail before export parent/root creation, even if
+   the public plan and manifest are edited together. See
+   [derivative-metadata evidence](domain/evidence/derivative-metadata.md).
+
+The crate is verified by 108 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no image encode/decode, no physical
