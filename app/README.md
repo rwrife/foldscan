@@ -101,7 +101,17 @@ Implemented so far (issue #5, domain work in `app/domain`):
    the public plan and manifest are edited together. See
    [derivative-metadata evidence](domain/evidence/derivative-metadata.md).
 
-The crate is verified by 108 unit/fixture tests plus a clean
+7. Cooperative export cancellation: `execute_export_cancellable` accepts a
+   host cancellation callback, checked after validation before directory
+   creation and between planned files, including before the final manifest.
+   Cancellation uses the existing rollback path and permits retry when the
+   new export root has been removed. The original API remains available.
+   Cancellation cannot interrupt a single file's I/O/verification, and requests
+   arriving after manifest writing starts are not observed. Rollback remains
+   best-effort on storage failure; parent directories may remain. See
+   [cancellation evidence](domain/evidence/export-cancellation.md).
+
+The crate is verified by 113 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no image encode/decode, no physical
