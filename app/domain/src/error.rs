@@ -1,7 +1,7 @@
 //! Stable error categories aligned with the FoldScan protocol error model.
 //!
-//! Categories intentionally mirror `docs/protocol.md` § Error model so that a
-//! host-side import failure can be reported without inventing new vocabulary.
+//! Categories mirror `docs/protocol.md` § Error model for import failures.
+//! `Cancelled` is a host-only operation outcome, not a device wire category.
 
 use thiserror::Error;
 
@@ -16,6 +16,8 @@ pub enum Category {
     ChecksumMismatch,
     /// A referenced file could not be read or was missing.
     StorageUnavailable,
+    /// Host-local operation cancelled by the caller; not a device wire error.
+    Cancelled,
     /// Catch-all that must never carry secrets or full private paths.
     InternalError,
 }

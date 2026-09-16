@@ -143,7 +143,46 @@ pub fn execute_export(
     sources: &HashMap<String, ExportSource>,
     manifest: &ExportManifest,
 ) -> Result<ExportExecution, DomainError> {
+    execute_export_cancellable(plan, root, sources, manifest, || false)
+}
+
+/// Materialize an export with cooperative host-side cancellation.
+///
+/// Cancellation is checked after request validation but before creating any
+/// directories, then before each planned file (including the final manifest).
+/// A callback can read a shared `AtomicBool` set by a UI/worker; returning true
+/// produces [`crate::error::Category::Cancelled`] and uses the same rollback
+/// path as I/O failures. The legacy [`execute_export`] supplies an always-false
+/// callback.
+///
+/// This is file-boundary cooperation, not an interrupt: validation, a single
+/// file's copy/hash/flush/read-back, and blocking OS calls run to completion.
+/// Content files are bounded to 64 MiB by preflight; that is a byte bound, not
+/// a wall-clock responsiveness guarantee. The last poll is immediately before
+/// manifest writing begins. Cancellation arriving after that point is not
+/// observed; successful manifest finalization and the final audit return Ok.
+/// Errors during finalization/audit still follow the existing rollback path.
+///
+/// The callback must be fast, must not panic, and must not mutate sources or
+/// the destination tree. Panics/process death are not caught. As with legacy
+/// export, rollback is best-effort if storage becomes unavailable, and newly
+/// created parent directories are retained. Retry only after confirming the
+/// export root is absent; an existing destination is never removed/replaced.
+/// This is a host API, not a device protocol or desktop UI implementation.
+pub fn execute_export_cancellable(
+    plan: &ExportPlan,
+    root: &Path,
+    sources: &HashMap<String, ExportSource>,
+    manifest: &ExportManifest,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<ExportExecution, DomainError> {
     let session = validate_request_shape(plan, manifest, sources)?;
+    if should_cancel() {
+        return Err(DomainError::new(
+            crate::error::Category::Cancelled,
+            "export cancelled",
+        ));
+    }
 
     if root.exists() {
         return Err(DomainError::invalid_request(
@@ -175,7 +214,7 @@ pub fn execute_export(
         }
     }
 
-    match run_plan(plan, session, root, sources, manifest) {
+    match run_plan(plan, session, root, sources, manifest, &mut should_cancel) {
         Ok(exec) => Ok(exec),
         Err(e) => {
             // Rollback: only the tree this call created is removed.
@@ -287,11 +326,18 @@ fn run_plan(
     root: &Path,
     sources: &HashMap<String, ExportSource>,
     manifest: &ExportManifest,
+    should_cancel: &mut impl FnMut() -> bool,
 ) -> Result<ExportExecution, DomainError> {
     let mut files_written = 0usize;
     let mut manifest_sha256 = String::new();
 
     for file in &plan.files {
+        if should_cancel() {
+            return Err(DomainError::new(
+                crate::error::Category::Cancelled,
+                "export cancelled",
+            ));
+        }
         match file.content_kind {
             ContentKind::Original => {
                 let page = page_for(session, file)?;

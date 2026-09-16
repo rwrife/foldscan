@@ -161,6 +161,206 @@ fn walk_files(base: &Path, dir: &Path, out: &mut Vec<String>) {
 }
 
 #[test]
+fn pre_cancel_leaves_export_parent_absent() {
+    let host = TempDir::new().unwrap();
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
+    let root = host.path().join("not-created/export");
+    let err = foldscan_domain::executor::execute_export_cancellable(
+        &plan,
+        &root,
+        &sources,
+        &manifest,
+        || true,
+    )
+    .unwrap_err();
+    assert_eq!(err.category, Category::Cancelled);
+    assert!(!root.parent().unwrap().exists());
+    for source in sources.values().filter_map(ExportSource::as_file_path) {
+        assert_eq!(std::fs::read(source).unwrap(), FAKE_JPEG);
+    }
+}
+
+#[test]
+fn cancellation_at_each_file_boundary_rolls_back_and_allows_retry() {
+    for boundary in 0..5 {
+        let host = TempDir::new().unwrap();
+        let (plan, manifest, sources, _) = reviewed_plan(host.path());
+        assert_eq!(plan.files.len(), 5);
+        assert_eq!(
+            plan.files.last().unwrap().content_kind,
+            foldscan_domain::ContentKind::Manifest
+        );
+        let root = host.path().join("out/export");
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        let sibling = root.parent().unwrap().join("keep.txt");
+        std::fs::write(&sibling, b"unrelated export").unwrap();
+        let mut observed_boundary = false;
+        let err = foldscan_domain::executor::execute_export_cancellable(
+            &plan,
+            &root,
+            &sources,
+            &manifest,
+            || {
+                if !root.is_dir() {
+                    return false;
+                }
+                let completed = plan
+                    .files
+                    .iter()
+                    .filter(|f| root.join(&f.relative_path).is_file())
+                    .count();
+                if completed != boundary {
+                    return false;
+                }
+                let mut actual = Vec::new();
+                walk_files(&root, &root, &mut actual);
+                let mut expected: Vec<_> = plan.files[..boundary]
+                    .iter()
+                    .map(|f| f.relative_path.clone())
+                    .collect();
+                actual.sort();
+                expected.sort();
+                assert_eq!(
+                    actual, expected,
+                    "only finalized prefix exists at cancellation"
+                );
+                assert!(!root.join("export.json").exists());
+                observed_boundary = true;
+                true
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.category, Category::Cancelled, "boundary {boundary}");
+        assert!(observed_boundary, "boundary {boundary} was reached");
+        assert!(!root.exists(), "cancelled tree must be removed");
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"unrelated export");
+        for source in sources.values().filter_map(ExportSource::as_file_path) {
+            assert_eq!(std::fs::read(source).unwrap(), FAKE_JPEG);
+        }
+        let retried = execute_export(&plan, &root, &sources, &manifest).unwrap();
+        assert_eq!(retried.files_written, plan.files.len());
+        assert_eq!(retried.manifest_digest, manifest.digest());
+        assert_eq!(
+            ExportManifest::from_json_bytes(&std::fs::read(root.join("export.json")).unwrap())
+                .unwrap(),
+            manifest
+        );
+        let mut files = Vec::new();
+        walk_files(&root, &root, &mut files);
+        assert_eq!(files.len(), plan.files.len());
+        assert!(files.iter().all(|p| !p.ends_with(PART_SUFFIX)));
+    }
+}
+
+#[test]
+fn never_cancel_matches_legacy_export_with_default_png_derivative() {
+    let host = TempDir::new().unwrap();
+    let (mut plan, _, sources, derivative_bytes) = reviewed_plan(host.path());
+    plan.sessions[0].pages[0].processed_media_type = None;
+    let plan = plan_export(&plan.sessions, &plan.recipes).unwrap();
+    let manifest = ExportManifest::from_plan(&plan, &plan.sessions[0].session_id).unwrap();
+    let legacy_root = host.path().join("legacy");
+    let cancellable_root = host.path().join("cancellable");
+    let legacy = execute_export(&plan, &legacy_root, &sources, &manifest).unwrap();
+    let mut polls = 0;
+    let cancellable = foldscan_domain::executor::execute_export_cancellable(
+        &plan,
+        &cancellable_root,
+        &sources,
+        &manifest,
+        || {
+            assert!(
+                !cancellable_root.join("export.json").exists(),
+                "no cancellation after manifest commit begins"
+            );
+            polls += 1;
+            false
+        },
+    )
+    .unwrap();
+    assert_eq!(polls, 1 + plan.files.len());
+    assert_eq!(cancellable.files_written, legacy.files_written);
+    assert_eq!(cancellable.manifest_sha256, legacy.manifest_sha256);
+    assert_eq!(cancellable.manifest_digest, legacy.manifest_digest);
+    let mut actual = Vec::new();
+    walk_files(&cancellable_root, &cancellable_root, &mut actual);
+    assert_eq!(actual.len(), plan.files.len());
+    for file in &plan.files {
+        let bytes = std::fs::read(cancellable_root.join(&file.relative_path)).unwrap();
+        assert_eq!(
+            bytes,
+            std::fs::read(legacy_root.join(&file.relative_path)).unwrap()
+        );
+        if file.content_kind == foldscan_domain::ContentKind::Derivative {
+            assert!(file.relative_path.ends_with(".png"));
+            assert_eq!(bytes, derivative_bytes);
+        }
+    }
+    assert_eq!(
+        ExportManifest::from_json_bytes(
+            &std::fs::read(cancellable_root.join("export.json")).unwrap()
+        )
+        .unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn cancelled_request_still_validates_before_polling() {
+    let host = TempDir::new().unwrap();
+    let (plan, mut manifest, sources, _) = reviewed_plan(host.path());
+    manifest.pages.reverse();
+    let root = host.path().join("absent/export");
+    let err = foldscan_domain::executor::execute_export_cancellable(
+        &plan,
+        &root,
+        &sources,
+        &manifest,
+        || panic!("invalid request must not poll cancellation"),
+    )
+    .unwrap_err();
+    assert_eq!(err.category, Category::InvalidRequest);
+    assert!(!root.parent().unwrap().exists());
+}
+
+#[test]
+fn cancellation_never_removes_existing_destination() {
+    let host = TempDir::new().unwrap();
+    let (plan, manifest, sources, _) = reviewed_plan(host.path());
+    let root = host.path().join("existing");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("sentinel"), b"keep my export").unwrap();
+    for cancelled in [false, true] {
+        let err = foldscan_domain::executor::execute_export_cancellable(
+            &plan,
+            &root,
+            &sources,
+            &manifest,
+            || cancelled,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.category,
+            if cancelled {
+                Category::Cancelled
+            } else {
+                Category::InvalidRequest
+            }
+        );
+        let mut files = Vec::new();
+        walk_files(&root, &root, &mut files);
+        assert_eq!(files, ["sentinel"]);
+        assert_eq!(
+            std::fs::read(root.join("sentinel")).unwrap(),
+            b"keep my export"
+        );
+    }
+    for source in sources.values().filter_map(ExportSource::as_file_path) {
+        assert_eq!(std::fs::read(source).unwrap(), FAKE_JPEG);
+    }
+}
+
+#[test]
 fn executes_plan_to_finalized_export_tree() {
     let host = TempDir::new().unwrap();
     let (plan, manifest, sources, derivative_bytes) = reviewed_plan(host.path());
