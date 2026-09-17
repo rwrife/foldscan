@@ -21,7 +21,10 @@
 //! - a deterministic grayscale processing core behind a `Processor`
 //!   interface (rotation, strict crop, bilinear quadrilateral rectification,
 //!   fixed-point illumination correction) whose output is bit-stable across
-//!   IEEE-754 hosts and locked by golden fixtures.
+//!   IEEE-754 hosts and locked by golden fixtures;
+//! - a bounded PNG encode/decode boundary for `GrayFrame` (8-bit grayscale
+//!   subset, std-only), with the decoder hardened against untrusted device
+//!   bytes and verified against independently encoded/decoded fixtures.
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
@@ -35,6 +38,7 @@ pub mod import;
 pub mod limits;
 pub mod manifest;
 pub mod paths;
+pub mod png;
 pub mod processing;
 pub mod recipe;
 pub mod version;
