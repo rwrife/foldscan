@@ -24,7 +24,11 @@
 //!   IEEE-754 hosts and locked by golden fixtures;
 //! - a bounded PNG encode/decode boundary for `GrayFrame` (8-bit grayscale
 //!   subset, std-only), with the decoder hardened against untrusted device
-//!   bytes and verified against independently encoded/decoded fixtures.
+//!   bytes and verified against independently encoded/decoded fixtures;
+//! - a deterministic PDF export writer that serializes an ordered page set
+//!   as image XObjects (std-only), self-verifying structure and payload
+//!   fidelity before returning, and cross-checked with an independent PDF
+//!   parser at fixture-generation time.
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
@@ -38,6 +42,7 @@ pub mod import;
 pub mod limits;
 pub mod manifest;
 pub mod paths;
+pub mod pdf;
 pub mod png;
 pub mod processing;
 pub mod recipe;
@@ -51,6 +56,7 @@ pub use export::{
 pub use image::GrayFrame;
 pub use import::{import_session, import_volume, ImportPlan, ImportedCapture, ImportedSession};
 pub use manifest::{CaptureEntry, DeviceManifest, SessionManifest};
+pub use pdf::export_pdf;
 pub use processing::{
     apply_recipe, auto_balance, estimate_illumination, flatten_illumination, perspective,
     shadow_lift, DeterministicProcessor, ProcessedFrame, Processor,
