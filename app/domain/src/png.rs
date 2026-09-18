@@ -98,7 +98,10 @@ fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 /// Wrap raw bytes in a zlib stream (RFC 1950) using deflate *stored*
 /// blocks (RFC 1952 §3.2.4): no compression, no matches, trivially
 /// decodable by any implementation, and easy to verify exactly.
-fn zlib_stored(data: &[u8]) -> Vec<u8> {
+///
+/// Crate-visible so the PDF writer (`pdf.rs`) can embed uncompressed
+/// image streams through the same already-tested stored-deflate path.
+pub(crate) fn zlib_stored(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + data.len() / 65535 + 11);
     // CMF = deflate (8) with 32K window (CINFO=7); FLG chosen so CMF*256+FLG
     // is a multiple of 31 (FCHECK), FDICT=0.
@@ -576,7 +579,10 @@ fn inflate_bounded(src: &[u8], expect: usize) -> Result<Vec<u8>, DomainError> {
 }
 
 /// Decode a zlib stream (RFC 1950) into exactly `expect` bytes.
-fn zlib_decode(src: &[u8], expect: usize) -> Result<Vec<u8>, DomainError> {
+///
+/// Crate-visible so the PDF writer (`pdf.rs`) can round-trip-verify the
+/// image streams it embeds before emitting the document.
+pub(crate) fn zlib_decode(src: &[u8], expect: usize) -> Result<Vec<u8>, DomainError> {
     if src.len() < 6 {
         return Err(DomainError::invalid_request("zlib: stream too short"));
     }

@@ -123,13 +123,27 @@ Implemented so far (issue #5, domain work in `app/domain`):
    Pillow-validated. JPEG remains out of scope; interlaced/palette/16-bit/
    alpha PNGs are rejected. See [PNG evidence](domain/evidence/png-codec.md).
 
-The crate is verified by 137 unit/fixture tests plus a clean
+9. PDF export writer: `pdf::export_pdf` serializes an ordered page set as
+   a deterministic PDF 1.4 document — one `/Image` XObject per page
+   (`/DeviceGray`, 8-bit, zlib stored-block stream under `/FlateDecode`,
+   1 px = 1 pt) with correct xref/trailer. Bounds (page count, per-frame
+   pixels/bytes, total document size) are enforced before allocation; a
+   post-assembly self-check re-parses the output and verifies structure and
+   payload fidelity (every embedded stream re-inflates to the exact source
+   frame) before returning. Byte-exact output is pinned by golden digests;
+   committed fixtures were cross-parsed with an independent PDF parser
+   (PyMuPDF) at generation time. PDF *parsing*, text/OCR layers, and
+   executor/manifest integration of PDF derivatives are out of scope.
+   See [PDF evidence](domain/evidence/pdf-export.md).
+
+The crate is verified by 148 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no physical
 device integration, and no optical-bench measurement has occurred. JPEG
-codec integration, corner detection, dewarp, PDF export, OCR, and the UI
-remain open work under this issue (PNG encode/decode landed in slice 8).
+codec integration, corner detection, dewarp, OCR, and the UI
+remain open work under this issue (PNG landed in slice 8; the PDF writer
+landed in slice 9).
 
 ## Verification
 
