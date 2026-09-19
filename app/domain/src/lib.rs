@@ -28,7 +28,11 @@
 //! - a deterministic PDF export writer that serializes an ordered page set
 //!   as image XObjects (std-only), self-verifying structure and payload
 //!   fidelity before returning, and cross-checked with an independent PDF
-//!   parser at fixture-generation time.
+//!   parser at fixture-generation time;
+//! - a versioned OCR result document (`foldscan.ocr/0.1`) with closed
+//!   failure/skip vocabularies, per-mille numeric confidence, bounded and
+//!   control-character-free recognized text, and a provider-interface seam
+//!   for a future offline engine (no engine is included).
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
@@ -41,6 +45,7 @@ pub mod image;
 pub mod import;
 pub mod limits;
 pub mod manifest;
+pub mod ocr;
 pub mod paths;
 pub mod pdf;
 pub mod png;
@@ -56,6 +61,11 @@ pub use export::{
 pub use image::GrayFrame;
 pub use import::{import_session, import_volume, ImportPlan, ImportedCapture, ImportedSession};
 pub use manifest::{CaptureEntry, DeviceManifest, SessionManifest};
+pub use ocr::{
+    OcrBlock, OcrFailureCode, OcrProvider, OcrResult, OcrSkipReason, OcrStatus,
+    CONFIDENCE_PER_MILLE_MAX, MAX_LANGUAGE_ID_LEN, MAX_OCR_BLOCKS, MAX_OCR_DOCUMENT_BYTES,
+    MAX_OCR_LANGUAGES, MAX_OCR_TEXT_CHARS, OCR_SCHEMA_PREFIX,
+};
 pub use pdf::export_pdf;
 pub use processing::{
     apply_recipe, auto_balance, estimate_illumination, flatten_illumination, perspective,
