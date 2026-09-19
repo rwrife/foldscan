@@ -136,14 +136,30 @@ Implemented so far (issue #5, domain work in `app/domain`):
    executor/manifest integration of PDF derivatives are out of scope.
    See [PDF evidence](domain/evidence/pdf-export.md).
 
-The crate is verified by 148 unit/fixture tests plus a clean
+10. OCR document core: `ocr::OcrResult` models a versioned
+    `foldscan.ocr/0.1` result document per capture — capture binding,
+    explicit requested language-pack list, and a closed terminal status
+    (completed blocks with per-mille integer confidence and pixel boxes
+    inside a declared frame, `failed` with a closed code vocabulary, or
+    `skipped` with a closed reason vocabulary; no document means "not
+    run"). Untrusted documents are bounded before parse and re-validated
+    after (language shape/uniqueness, confidence range, block and text
+    bounds, overflow-checked box-in-frame, control-character-free text),
+    carry a canonical-JSON integrity digest, and `ocr::OcrProvider` is the
+    narrow seam a future offline engine implements. Tests pin that export
+    layout and manifest digests are identical whether OCR completed,
+    failed, or never ran — an OCR failure cannot change or block export
+    planning. **No OCR engine exists**; nothing here recognizes text. See
+    [OCR evidence](domain/evidence/ocr-document.md).
+
+The crate is verified by 165 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no physical
 device integration, and no optical-bench measurement has occurred. JPEG
-codec integration, corner detection, dewarp, OCR, and the UI
+codec integration, corner detection, dewarp, an actual OCR engine, and the UI
 remain open work under this issue (PNG landed in slice 8; the PDF writer
-landed in slice 9).
+landed in slice 9; the OCR document core landed in slice 10).
 
 ## Verification
 
