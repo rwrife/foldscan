@@ -152,14 +152,30 @@ Implemented so far (issue #5, domain work in `app/domain`):
     planning. **No OCR engine exists**; nothing here recognizes text. See
     [OCR evidence](domain/evidence/ocr-document.md).
 
-The crate is verified by 165 unit/fixture tests plus a clean
+11. Session document binding: an `ExportSession` may carry one
+    `SessionDocument` — an assembled artifact (today only a PDF from
+    `pdf::export_pdf`) with SHA-256, bounded byte count, and ordered
+    per-capture bindings (capture id + declared frame dimensions) that must
+    equal the session export page order exactly. The planner lays it out at
+    `documents/<session>/session.pdf`, the `foldscan.export/0.1` manifest
+    carries the plan-derived path and the bindings (covered by the
+    integrity digest), and the executor materializes it through the same
+    staged/verify/finalize gates as derivatives, from file-backed or
+    in-memory bytes. Absence means pages-only export, byte-identical to
+    earlier slices; reordering pages without rebuilding the binding is
+    rejected before any disk write. This is how the manifest answers
+    "verify exported page order/dimensions" without re-parsing PDF bytes.
+    See [session-document evidence](domain/evidence/session-document.md).
+
+The crate is verified by 181 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no physical
 device integration, and no optical-bench measurement has occurred. JPEG
 codec integration, corner detection, dewarp, an actual OCR engine, and the UI
 remain open work under this issue (PNG landed in slice 8; the PDF writer
-landed in slice 9; the OCR document core landed in slice 10).
+landed in slice 9; the OCR document core landed in slice 10; the session
+document export binding landed in slice 11).
 
 ## Verification
 

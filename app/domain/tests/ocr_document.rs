@@ -315,6 +315,7 @@ fn session_with_pages() -> ExportSession {
                 recipe_digest: None,
             })
             .collect(),
+        document: None,
     }
 }
 

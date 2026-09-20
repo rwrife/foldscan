@@ -271,14 +271,15 @@ fn validate_request_shape<'a>(
         }
     }
 
-    // Sources must cover exactly the original/derivative paths, no more.
+    // Sources must cover exactly the original/derivative/document paths,
+    // no more.
     let content_paths: HashSet<&str> = plan
         .files
         .iter()
         .filter(|f| {
             matches!(
                 f.content_kind,
-                ContentKind::Original | ContentKind::Derivative
+                ContentKind::Original | ContentKind::Derivative | ContentKind::Document
             )
         })
         .map(|f| f.relative_path.as_str())
@@ -313,6 +314,22 @@ fn validate_request_shape<'a>(
         if f.content_kind == ContentKind::Original && source.as_file_path().is_none() {
             return Err(DomainError::invalid_request(format!(
                 "original source must be file-backed: {}",
+                f.relative_path
+            )));
+        }
+    }
+    // Document files (session-level assembled documents) bind no single
+    // capture, so they are outside the loop above; each still needs exactly
+    // one source, checked here so a missing one fails before the export
+    // root is created.
+    for f in plan
+        .files
+        .iter()
+        .filter(|f| f.content_kind == ContentKind::Document)
+    {
+        if !sources.contains_key(&f.relative_path) {
+            return Err(DomainError::invalid_request(format!(
+                "missing export source for planned file: {}",
                 f.relative_path
             )));
         }
@@ -364,6 +381,20 @@ fn run_plan(
                     ExportSource::File(path) => copy_file_verified(root, file, path, sha, bytes)?,
                     ExportSource::Bytes(payload) => {
                         write_bytes_verified(root, file, payload, sha, bytes)?
+                    }
+                }
+            }
+            ContentKind::Document => {
+                // Session-level assembled document (a session PDF): same
+                // staged/verify/finalize discipline as a derivative, with
+                // the declared checksum/size taken from the manifest record.
+                let doc = session_document_of(manifest)?;
+                match source_for(sources, file)? {
+                    ExportSource::File(path) => {
+                        copy_file_verified(root, file, path, &doc.sha256, doc.bytes)?
+                    }
+                    ExportSource::Bytes(payload) => {
+                        write_bytes_verified(root, file, payload, &doc.sha256, doc.bytes)?
                     }
                 }
             }
@@ -428,6 +459,19 @@ fn source_for<'a>(
             file.relative_path
         ))
     })
+}
+
+/// The manifest's session-document record. Plan/manifest equality was
+/// already enforced in `validate_request_shape`, so a Document-kind file
+/// guarantees the record is present; its absence is an internal invariant
+/// violation, never caller input.
+fn session_document_of(
+    manifest: &ExportManifest,
+) -> Result<&crate::export::ExportManifestDocument, DomainError> {
+    manifest
+        .document
+        .as_ref()
+        .ok_or_else(|| DomainError::internal("document planned without a manifest document record"))
 }
 
 /// Copy `source` to the file's final planned location through a staged

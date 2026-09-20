@@ -32,7 +32,12 @@
 //! - a versioned OCR result document (`foldscan.ocr/0.1`) with closed
 //!   failure/skip vocabularies, per-mille numeric confidence, bounded and
 //!   control-character-free recognized text, and a provider-interface seam
-//!   for a future offline engine (no engine is included).
+//!   for a future offline engine (no engine is included);
+//! - an optional session-level document binding (assembled PDF, checksum,
+//!   bounded size, and ordered per-capture page/dimension bindings that
+//!   must equal the export page order) carried through the export planner,
+//!   the portable manifest digest, and the executor's staged/verify/finalize
+//!   discipline.
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
@@ -55,8 +60,9 @@ pub mod version;
 
 pub use error::{Category, DomainError};
 pub use export::{
-    export_sessions_from_import, plan_export, remove_from, reorder, ContentKind, ExportManifest,
-    ExportPage, ExportPlan, ExportSession,
+    export_sessions_from_import, plan_export, remove_from, reorder, ContentKind, DocumentPage,
+    ExportManifest, ExportManifestDocument, ExportManifestPage, ExportPage, ExportPlan,
+    ExportSession, SessionDocument,
 };
 pub use image::GrayFrame;
 pub use import::{import_session, import_volume, ImportPlan, ImportedCapture, ImportedSession};
