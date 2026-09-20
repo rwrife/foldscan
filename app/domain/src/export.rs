@@ -12,7 +12,12 @@
 //!   in the plan before any executor touches disk;
 //! - a versioned, checksum-bound [`ExportManifest`] (`foldscan.export/0.1`)
 //!   whose integrity fields cover page order and content, written last per
-//!   the protocol's temporary-write/verify/finalize rule.
+//!   the protocol's temporary-write/verify/finalize rule;
+//! - an optional session-level document binding ([`SessionDocument`] /
+//!   [`ExportManifestDocument`]): one assembled artifact per session
+//!   (today only a PDF from [`crate::pdf`]) whose ordered capture bindings
+//!   must equal the export page order, laid out at
+//!   `documents/<session>/session.pdf` and covered by the manifest digest.
 //!
 //! Evidence category: planning + validation over data structures only. No
 //! image encoding, PDF writing, or filesystem mutation happens here, and no
@@ -41,6 +46,12 @@ pub const PROCESSED_DIR: &str = "processed";
 
 /// Directory segment for recipe JSON documents inside an export.
 pub const RECIPES_DIR: &str = "recipes";
+
+/// Directory segment for session-level documents inside an export.
+pub const DOCUMENTS_DIR: &str = "documents";
+
+/// File name of the session-level assembled document inside `documents/`.
+pub const SESSION_DOCUMENT_FILE: &str = "session.pdf";
 
 /// File name of the portable manifest at the export root.
 pub const EXPORT_MANIFEST_FILE: &str = "export.json";
@@ -72,6 +83,112 @@ pub struct ExportPage {
 pub struct ExportSession {
     pub session_id: String,
     pub pages: Vec<ExportPage>,
+    /// Optional session-level assembled document (e.g. the PDF built from
+    /// the ordered page set). `None` means the session exports pages only,
+    /// exactly as before this field existed.
+    pub document: Option<SessionDocument>,
+}
+
+/// One capture's participation in a session-level document: which capture
+/// contributed a page and the frame dimensions that page was assembled at.
+/// Recording dimensions here is what makes the issue #5 criterion "verify
+/// exported page order/dimensions" checkable from the portable manifest
+/// alone, without re-parsing the document bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentPage {
+    pub capture_id: String,
+    /// Declared frame width of this page inside the assembled document.
+    pub width_px: u32,
+    /// Declared frame height of this page inside the assembled document.
+    pub height_px: u32,
+}
+
+/// A session-level document derivative: one assembled artifact (today only
+/// a PDF, produced by [`crate::pdf::export_pdf`] over the ordered page set)
+/// carried alongside the per-page originals/derivatives.
+///
+/// The binding list must equal the session's export page order exactly —
+/// the document *is* the page order, so a manifest whose document claims a
+/// different order is rejected rather than silently exported.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDocument {
+    /// Closed media-type vocabulary; only `application/pdf` is accepted.
+    pub media_type: String,
+    /// Lowercase-hex SHA-256 of the assembled document bytes.
+    pub sha256: String,
+    /// Declared byte count, bounded by the PDF writer's document ceiling.
+    pub bytes: u64,
+    /// Ordered per-capture page bindings, equal to the session page order.
+    pub pages: Vec<DocumentPage>,
+}
+
+impl SessionDocument {
+    /// Validate a document record against the ordered capture ids it must
+    /// bind to (media vocabulary, checksum shape, byte/dimension bounds,
+    /// non-empty binding list, exact order equality). Bounds-checked
+    /// arithmetic only; nothing here reads document bytes.
+    pub(crate) fn validate_against<'a>(
+        &self,
+        page_ids: impl Iterator<Item = &'a str>,
+    ) -> Result<(), DomainError> {
+        validate_document_fields(
+            &self.media_type,
+            &self.sha256,
+            self.bytes,
+            &self.pages,
+            page_ids,
+        )
+    }
+}
+
+/// Shared field validation for both the session-side and manifest-side
+/// views of a session document (same rules, different struct shapes).
+fn validate_document_fields<'a>(
+    media_type: &str,
+    sha256: &str,
+    bytes: u64,
+    pages: &[DocumentPage],
+    page_ids: impl Iterator<Item = &'a str>,
+) -> Result<(), DomainError> {
+    if media_type != "application/pdf" {
+        return Err(DomainError::invalid_request(format!(
+            "session document media type {media_type} is not supported (only application/pdf)"
+        )));
+    }
+    validate_checksum("session document sha256", sha256)?;
+    if bytes > crate::pdf::MAX_DOCUMENT_BYTES {
+        return Err(DomainError::invalid_request(format!(
+            "session document declares {bytes} bytes, over the {} limit",
+            crate::pdf::MAX_DOCUMENT_BYTES
+        )));
+    }
+    if pages.is_empty() {
+        return Err(DomainError::invalid_request(
+            "session document must bind at least one page",
+        ));
+    }
+    let declared: Vec<&str> = pages.iter().map(|p| p.capture_id.as_str()).collect();
+    let expected: Vec<&str> = page_ids.collect();
+    if declared != expected {
+        return Err(DomainError::invalid_request(
+            "session document page bindings must equal the session export page order",
+        ));
+    }
+    for p in pages {
+        if p.width_px == 0 || p.height_px == 0 {
+            return Err(DomainError::invalid_request(format!(
+                "document page {} declares a zero dimension",
+                p.capture_id
+            )));
+        }
+        if (p.width_px as u64) > MAX_DIMENSION_PX || (p.height_px as u64) > MAX_DIMENSION_PX {
+            return Err(DomainError::invalid_request(format!(
+                "document page {} declares a pixel dimension over {MAX_DIMENSION_PX}",
+                p.capture_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Build export sessions (and the recipe documents they reference) from a
@@ -96,6 +213,7 @@ pub fn export_sessions_from_import(sessions: &[ImportedSession]) -> Vec<ExportSe
                     recipe_digest: None,
                 })
                 .collect(),
+            document: None,
         })
         .collect()
 }
@@ -142,6 +260,7 @@ pub struct PlannedFile {
 pub enum ContentKind {
     Original,
     Derivative,
+    Document,
     Recipe,
     Manifest,
 }
@@ -247,6 +366,22 @@ pub fn plan_export(
                     "original-only page must not carry derivative metadata",
                 ));
             }
+        }
+
+        // Session-level assembled document, when one is bound. Its page
+        // bindings must equal this session's export page order; the layout
+        // path is derived (never caller-supplied), so it cannot smuggle a
+        // different destination.
+        if let Some(doc) = &session.document {
+            doc.validate_against(session.pages.iter().map(|p| p.capture_id.as_str()))?;
+            let doc_path = format!("{}/{}/{}", DOCUMENTS_DIR, sdir, SESSION_DOCUMENT_FILE);
+            insert_path(
+                &mut files,
+                &mut seen_paths,
+                doc_path,
+                None,
+                ContentKind::Document,
+            )?;
         }
     }
 
@@ -368,6 +503,40 @@ pub struct ExportManifest {
     pub schema: String,
     pub session_id: String,
     pub pages: Vec<ExportManifestPage>,
+    /// Session-level assembled document (path from the plan), when bound.
+    /// Absent/null means pages-only export, byte-identical to pre-document
+    /// manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<ExportManifestDocument>,
+}
+
+/// Manifest view of a [`SessionDocument`]: the record plus the plan-derived
+/// layout path. The path is never caller-supplied — `from_plan` copies it
+/// from the collision-checked layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportManifestDocument {
+    pub path: String,
+    /// Closed media-type vocabulary; only `application/pdf` is accepted.
+    pub media_type: String,
+    pub sha256: String,
+    pub bytes: u64,
+    /// Ordered per-capture page bindings, equal to the manifest page order.
+    pub pages: Vec<DocumentPage>,
+}
+
+impl ExportManifestDocument {
+    pub(crate) fn validate_against<'a>(
+        &self,
+        page_ids: impl Iterator<Item = &'a str>,
+    ) -> Result<(), DomainError> {
+        validate_document_fields(
+            &self.media_type,
+            &self.sha256,
+            self.bytes,
+            &self.pages,
+            page_ids,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -441,10 +610,44 @@ impl ExportManifest {
             });
         }
 
+        let document = match &session.document {
+            None => None,
+            Some(doc) => {
+                // Match the exact per-session layout path rather than the
+                // first Document file in the plan, so a multi-session plan
+                // (or an edited one) can never bind one session's document
+                // path into another session's manifest.
+                let expected_doc_path =
+                    format!("{}/{}/{}", DOCUMENTS_DIR, session_id, SESSION_DOCUMENT_FILE);
+                let path = plan
+                    .files
+                    .iter()
+                    .find(|f| {
+                        f.content_kind == ContentKind::Document
+                            && f.relative_path == expected_doc_path
+                    })
+                    .ok_or_else(|| {
+                        DomainError::internal(
+                            "document layout missing from plan for a documented session",
+                        )
+                    })?
+                    .relative_path
+                    .clone();
+                Some(ExportManifestDocument {
+                    path,
+                    media_type: doc.media_type.clone(),
+                    sha256: doc.sha256.clone(),
+                    bytes: doc.bytes,
+                    pages: doc.pages.clone(),
+                })
+            }
+        };
+
         let manifest = ExportManifest {
             schema: format!("{}0.1", EXPORT_SCHEMA_PREFIX),
             session_id: session_id.to_string(),
             pages,
+            document,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -510,6 +713,10 @@ impl ExportManifest {
             if let Some(p) = &page.processed_path {
                 crate::paths::safe_join(std::path::Path::new("/"), p)?;
             }
+        }
+        if let Some(doc) = &self.document {
+            doc.validate_against(self.pages.iter().map(|p| p.capture_id.as_str()))?;
+            crate::paths::safe_join(std::path::Path::new("/"), &doc.path)?;
         }
         Ok(version)
     }
@@ -584,6 +791,7 @@ mod tests {
         ExportSession {
             session_id: "sess-0001".to_string(),
             pages: vec![page("cap-a"), page("cap-b"), page("cap-c")],
+            document: None,
         }
     }
 
