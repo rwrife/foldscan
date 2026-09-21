@@ -18,6 +18,11 @@
 //!   (today only a PDF from [`crate::pdf`]) whose ordered capture bindings
 //!   must equal the export page order, laid out at
 //!   `documents/<session>/session.pdf` and covered by the manifest digest.
+//! - an optional per-capture OCR sidecar binding: *completed*
+//!   [`crate::ocr::OcrResult`] documents laid out at
+//!   `ocr/<session>/<capture>.json` and bound into the manifest by content
+//!   digest. `failed`/`skipped` results are rejected at the bind boundary so
+//!   OCR failure structurally cannot alter or block an image/PDF export.
 //!
 //! Evidence category: planning + validation over data structures only. No
 //! image encoding, PDF writing, or filesystem mutation happens here, and no
@@ -49,6 +54,9 @@ pub const RECIPES_DIR: &str = "recipes";
 
 /// Directory segment for session-level documents inside an export.
 pub const DOCUMENTS_DIR: &str = "documents";
+
+/// Directory segment for per-capture OCR sidecar documents inside an export.
+pub const OCR_DIR: &str = "ocr";
 
 /// File name of the session-level assembled document inside `documents/`.
 pub const SESSION_DOCUMENT_FILE: &str = "session.pdf";
@@ -87,6 +95,14 @@ pub struct ExportSession {
     /// the ordered page set). `None` means the session exports pages only,
     /// exactly as before this field existed.
     pub document: Option<SessionDocument>,
+    /// Optional per-capture OCR sidecar documents to export alongside the
+    /// pages. Only [`crate::ocr::OcrStatus::Completed`] documents may be
+    /// bound — `failed`/`skipped` outcomes are host-local review state and
+    /// structurally cannot enter an export (issue #5: OCR failure must not
+    /// block image/PDF export). An empty list means no OCR content, exactly
+    /// as before this field existed. Each capture may appear at most once,
+    /// and every entry must bind to a capture present in `pages`.
+    pub ocr: Vec<crate::ocr::OcrResult>,
 }
 
 /// One capture's participation in a session-level document: which capture
@@ -191,6 +207,60 @@ fn validate_document_fields<'a>(
     Ok(())
 }
 
+/// Validate a session's OCR sidecar binding list and index it by capture.
+/// Rules (all checked against the *whole* list, so partial-binding states
+/// fail deterministically):
+/// - every document re-validates as a well-formed `foldscan.ocr/0.1` doc;
+/// - only `completed` documents are bindable — `failed`/`skipped` are host
+///   review state, and admitting them would let OCR outcomes leak into the
+///   export layout/manifest (issue #5 requires OCR failure to never block
+///   or alter image/PDF export; the only export-relevant OCR fact is text
+///   that actually exists);
+/// - every sidecar binds to a capture that is actually in the export;
+/// - at most one sidecar per capture.
+///
+/// Layout order itself is derived from session page order by the planner,
+/// so the host's list order can never change the plan.
+fn validate_ocr_bindings(
+    session: &ExportSession,
+) -> Result<std::collections::HashMap<&str, &crate::ocr::OcrResult>, DomainError> {
+    use std::collections::HashMap;
+
+    let page_ids: std::collections::HashSet<&str> = session
+        .pages
+        .iter()
+        .map(|p| p.capture_id.as_str())
+        .collect();
+    let mut index: HashMap<&str, &crate::ocr::OcrResult> = HashMap::new();
+    for doc in &session.ocr {
+        doc.validate().map_err(|e| {
+            DomainError::invalid_request(format!(
+                "bound ocr document for {} is invalid: {}",
+                doc.capture_id, e.message
+            ))
+        })?;
+        if !matches!(doc.status, crate::ocr::OcrStatus::Completed { .. }) {
+            return Err(DomainError::invalid_request(format!(
+                "ocr sidecar for {} is not a completed result; only completed documents export",
+                doc.capture_id
+            )));
+        }
+        if !page_ids.contains(doc.capture_id.as_str()) {
+            return Err(DomainError::invalid_request(format!(
+                "ocr sidecar binds capture {} which is not in the export",
+                doc.capture_id
+            )));
+        }
+        if index.insert(doc.capture_id.as_str(), doc).is_some() {
+            return Err(DomainError::invalid_request(format!(
+                "duplicate ocr sidecar for capture {}",
+                doc.capture_id
+            )));
+        }
+    }
+    Ok(index)
+}
+
 /// Build export sessions (and the recipe documents they reference) from a
 /// validated import. Every imported capture becomes an original-backed page;
 /// no processing has happened yet, so no derivatives exist.
@@ -214,6 +284,7 @@ pub fn export_sessions_from_import(sessions: &[ImportedSession]) -> Vec<ExportSe
                 })
                 .collect(),
             document: None,
+            ocr: Vec::new(),
         })
         .collect()
 }
@@ -261,6 +332,7 @@ pub enum ContentKind {
     Original,
     Derivative,
     Document,
+    Ocr,
     Recipe,
     Manifest,
 }
@@ -382,6 +454,25 @@ pub fn plan_export(
                 None,
                 ContentKind::Document,
             )?;
+        }
+
+        // Per-capture OCR sidecars, when bound. Validation happens against
+        // the whole binding list first (closed terminal status, known
+        // captures, one sidecar per capture), then layout follows *session
+        // page order* — not binding-list order — so the plan is identical
+        // however the host happens to order its OCR list.
+        let ocr_index = validate_ocr_bindings(session)?;
+        for page in &session.pages {
+            if ocr_index.contains_key(page.capture_id.as_str()) {
+                let ocr_path = format!("{}/{}/{}.json", OCR_DIR, sdir, page.capture_id);
+                insert_path(
+                    &mut files,
+                    &mut seen_paths,
+                    ocr_path,
+                    Some(&page.capture_id),
+                    ContentKind::Ocr,
+                )?;
+            }
         }
     }
 
@@ -553,6 +644,14 @@ pub struct ExportManifestPage {
     pub processed_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe_digest: Option<String>,
+    /// Canonical-JSON content digest ([`crate::ocr::OcrResult::digest`]) of
+    /// the OCR sidecar bound to this capture. Present iff the export lays
+    /// out an `ocr/` document for the capture; absent means no OCR content,
+    /// byte-identical to pre-sidecar manifests. Binding the digest (not a
+    /// path — the path is derived) makes the manifest integrity digest cover
+    /// exactly *which* captures carry OCR text and *what* that text is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_digest: Option<String>,
 }
 
 impl ExportManifest {
@@ -567,7 +666,36 @@ impl ExportManifest {
             .ok_or_else(|| DomainError::invalid_request("session not present in export plan"))?;
 
         let mut pages = Vec::with_capacity(session.pages.len());
+        // OCR sidecar index for this session's bound documents. A plan whose
+        // Ocr-kind layout disagrees with the bindings (extra or missing
+        // sidecar files for an edited plan) is rejected here, so a manifest
+        // can never claim OCR content the layout does not carry, or omit a
+        // digest for a sidecar the layout does carry.
+        let ocr_index = validate_ocr_bindings(session)?;
+        let planned_ocr: std::collections::HashSet<&str> = plan
+            .files
+            .iter()
+            .filter(|f| f.content_kind == ContentKind::Ocr)
+            .map(|f| f.capture_id.as_deref().unwrap_or_default())
+            .collect();
         for page in &session.pages {
+            let binds_ocr = ocr_index.contains_key(page.capture_id.as_str());
+            let plans_ocr = planned_ocr.contains(page.capture_id.as_str());
+            if binds_ocr != plans_ocr {
+                return Err(DomainError::internal(
+                    "ocr sidecar layout does not match the session's ocr bindings",
+                ));
+            }
+            let ocr_digest = if binds_ocr {
+                Some(
+                    ocr_index
+                        .get(page.capture_id.as_str())
+                        .expect("presence checked above")
+                        .digest(),
+                )
+            } else {
+                None
+            };
             let original_path = plan
                 .files
                 .iter()
@@ -607,6 +735,7 @@ impl ExportManifest {
                 processed_sha256: page.processed_sha256.clone(),
                 processed_bytes: page.processed_bytes,
                 recipe_digest: page.recipe_digest.clone(),
+                ocr_digest,
             });
         }
 
@@ -700,6 +829,9 @@ impl ExportManifest {
             if let Some(digest) = &page.recipe_digest {
                 validate_checksum("recipe digest", digest)?;
             }
+            if let Some(digest) = &page.ocr_digest {
+                validate_checksum("ocr digest", digest)?;
+            }
             if let Some(bytes) = page.processed_bytes {
                 validate_processed_bytes(bytes)?;
             }
@@ -792,6 +924,7 @@ mod tests {
             session_id: "sess-0001".to_string(),
             pages: vec![page("cap-a"), page("cap-b"), page("cap-c")],
             document: None,
+            ocr: Vec::new(),
         }
     }
 

@@ -167,7 +167,21 @@ Implemented so far (issue #5, domain work in `app/domain`):
     "verify exported page order/dimensions" without re-parsing PDF bytes.
     See [session-document evidence](domain/evidence/session-document.md).
 
-The crate is verified by 181 unit/fixture tests plus a clean
+12. OCR sidecar export binding: an `ExportSession` may bind per-capture
+    `foldscan.ocr/0.1` documents. Only *completed* results bind —
+    `failed`/`skipped` outcomes are host review state and structurally
+    cannot enter an export, so issue #5's "OCR failure must not block
+    image/PDF export" holds by construction. The planner lays them out at
+    `ocr/<session>/<capture>.json` in page order (host binding-list order
+    can never change the plan), the manifest binds each sidecar's
+    canonical-JSON content digest per page, and the executor serializes the
+    bound document itself — never host-supplied bytes — through the same
+    staged/verify/finalize gates with a read-back re-parse proof. Absence
+    means byte-identical pre-slice exports. This is the export path for
+    OCR text; a plain-`.txt` rendering remains a follow-up. No OCR engine
+    exists. See [OCR sidecar evidence](domain/evidence/ocr-sidecar-export.md).
+
+The crate is verified by 197 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no physical
@@ -175,7 +189,8 @@ device integration, and no optical-bench measurement has occurred. JPEG
 codec integration, corner detection, dewarp, an actual OCR engine, and the UI
 remain open work under this issue (PNG landed in slice 8; the PDF writer
 landed in slice 9; the OCR document core landed in slice 10; the session
-document export binding landed in slice 11).
+document export binding landed in slice 11; the OCR sidecar export binding
+landed in slice 12).
 
 ## Verification
 

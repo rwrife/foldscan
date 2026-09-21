@@ -100,7 +100,7 @@ pub enum OcrSkipReason {
 }
 
 /// One recognized text block with its location and uncertainty.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OcrBlock {
     /// Editable recognized text (bounded, no control characters).
     pub text: String,
@@ -114,7 +114,7 @@ pub struct OcrBlock {
 }
 
 /// The terminal status of one OCR pass over one capture.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OcrStatus {
     /// Recognition finished; blocks carry the result (possibly zero blocks
@@ -133,7 +133,7 @@ pub enum OcrStatus {
 }
 
 /// A versioned, reviewable OCR result document for one capture.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OcrResult {
     /// Schema tag, e.g. `foldscan.ocr/0.1`.
     pub schema: String,

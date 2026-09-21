@@ -316,6 +316,7 @@ fn session_with_pages() -> ExportSession {
             })
             .collect(),
         document: None,
+        ocr: Vec::new(),
     }
 }
 

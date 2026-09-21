@@ -286,6 +286,16 @@ fn validate_request_shape<'a>(
         .collect();
     for key in sources.keys() {
         if !content_paths.contains(key.as_str()) {
+            if plan
+                .files
+                .iter()
+                .any(|f| f.content_kind == ContentKind::Ocr && &f.relative_path == key)
+            {
+                return Err(DomainError::invalid_request(format!(
+                    "ocr sidecar {} is serialized from the bound document, not from a source",
+                    key
+                )));
+            }
             return Err(DomainError::invalid_request(format!(
                 "export source supplied for unplanned path: {}",
                 key
@@ -397,6 +407,15 @@ fn run_plan(
                         write_bytes_verified(root, file, payload, &doc.sha256, doc.bytes)?
                     }
                 }
+            }
+            ContentKind::Ocr => {
+                // Per-capture OCR sidecar: serialized from the *bound*
+                // document in the plan's session (never from a host-supplied
+                // source, rejected in validate_request_shape), so the bytes
+                // written are exactly the reviewed document the manifest
+                // digest binds.
+                let bytes = ocr_document(session, file)?;
+                write_verified(root, file, &bytes)?;
             }
             ContentKind::Recipe => {
                 let bytes = recipe_document(plan, file)?;
@@ -753,6 +772,41 @@ fn recipe_document(plan: &ExportPlan, file: &PlannedFile) -> Result<Vec<u8>, Dom
     if back != *recipe {
         return Err(DomainError::internal(
             "recipe document failed read-back round-trip validation",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Serialize a bound OCR sidecar document and prove it round-trips through
+/// the untrusted-document parser back to the exact document the session
+/// bound (same discipline as recipe documents). The bytes come from the
+/// plan's session, never from the host sources map.
+fn ocr_document(session: &ExportSession, file: &PlannedFile) -> Result<Vec<u8>, DomainError> {
+    let cid = file
+        .capture_id
+        .as_deref()
+        .ok_or_else(|| DomainError::internal("ocr sidecar file without capture_id in plan"))?;
+    let doc = session
+        .ocr
+        .iter()
+        .find(|d| d.capture_id == cid)
+        .ok_or_else(|| {
+            DomainError::invalid_request(format!(
+                "ocr sidecar {} is not bound in the export session",
+                cid
+            ))
+        })?;
+    let bytes = serde_json::to_vec_pretty(doc)
+        .map_err(|_| DomainError::internal("ocr sidecar serialization failed"))?;
+    if bytes.len() > crate::ocr::MAX_OCR_DOCUMENT_BYTES {
+        return Err(DomainError::internal(
+            "ocr sidecar exceeds its byte bound after serialization",
+        ));
+    }
+    let back = crate::ocr::OcrResult::from_json_bytes(&bytes)?;
+    if back != *doc {
+        return Err(DomainError::internal(
+            "ocr sidecar failed read-back round-trip validation",
         ));
     }
     Ok(bytes)

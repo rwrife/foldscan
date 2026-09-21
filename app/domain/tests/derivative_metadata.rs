@@ -25,6 +25,7 @@ fn session(mask: u8) -> ExportSession {
             processed_media_type: (mask & 8 != 0).then(|| "image/png".into()),
         }],
         document: None,
+        ocr: Vec::new(),
     }
 }
 
