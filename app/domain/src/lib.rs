@@ -37,7 +37,12 @@
 //!   bounded size, and ordered per-capture page/dimension bindings that
 //!   must equal the export page order) carried through the export planner,
 //!   the portable manifest digest, and the executor's staged/verify/finalize
-//!   discipline.
+//!   discipline;
+//! - an optional per-capture OCR sidecar binding: *completed* OCR result
+//!   documents laid out at `ocr/<session>/<capture>.json` in page order,
+//!   bound into the manifest by content digest, and serialized by the
+//!   executor from the bound document (never host-supplied bytes) under the
+//!   same verify/finalize gates.
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
