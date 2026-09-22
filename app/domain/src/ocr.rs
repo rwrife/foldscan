@@ -55,6 +55,12 @@ pub const MAX_OCR_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Maximum recognized text characters in one document (sum over blocks).
 pub const MAX_OCR_TEXT_CHARS: usize = 200_000;
 
+/// Upper bound in bytes on one plain-text rendering
+/// ([`OcrResult::render_plain_text`]): every recognized character can be at
+/// most 4 UTF-8 bytes, plus one `\n` separator per block. Derived from the
+/// validated bounds above, so a rendering can never exceed it.
+pub const MAX_OCR_TEXT_BYTES: usize = MAX_OCR_TEXT_CHARS * 4 + MAX_OCR_BLOCKS;
+
 /// Maximum recognized blocks in one document.
 pub const MAX_OCR_BLOCKS: usize = 20_000;
 
@@ -266,6 +272,53 @@ impl OcrResult {
         let value = serde_json::to_value(self).expect("ocr serialization is infallible");
         let canonical = canonical_json_for_digest(&value);
         sha256_hex(canonical.as_bytes())
+    }
+
+    /// Deterministic plain-text rendering of a *completed* OCR document.
+    ///
+    /// The rendering is the editable-text export artifact (issue #35):
+    /// block texts in document order, one `\n` separator between blocks and
+    /// one trailing `\n` after the last block. A completed document with no
+    /// blocks renders to exactly one newline (an empty-but-present page
+    /// text). Block order is content, so re-ordering blocks changes the
+    /// rendering and its digest; there is deliberately no geometric re-flow
+    /// (no engine has proven a line/column reconstruction rule yet).
+    ///
+    /// Output properties, guaranteed structurally:
+    /// - pure UTF-8 text, never empty (at least the trailing newline);
+    /// - never carries control characters, because block text validation
+    ///   rejects them and `\n` is the only separator this function adds;
+    /// - bounded by [`MAX_OCR_TEXT_CHARS`] characters plus one newline per
+    ///   block, all enforced upstream by [`OcrResult::validate`].
+    ///
+    /// Non-completed documents have no text to render and return
+    /// `invalid_request` — consistent with the export rule that only
+    /// completed results can bind.
+    pub fn render_plain_text(&self) -> Result<String, DomainError> {
+        self.validate()?;
+        let OcrStatus::Completed { blocks, .. } = &self.status else {
+            return Err(DomainError::invalid_request(format!(
+                "ocr document for {} is not completed; nothing to render",
+                self.capture_id
+            )));
+        };
+        let mut out = String::new();
+        for block in blocks {
+            out.push_str(&block.text);
+            out.push('\n');
+        }
+        if out.is_empty() {
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
+    /// Content digest of the [`render_plain_text`](Self::render_plain_text)
+    /// rendering (`SHA-256` over the exact rendered bytes). Bound into the
+    /// export manifest next to the JSON document digest so the manifest
+    /// pins both the reviewed document and its text rendition.
+    pub fn plain_text_digest(&self) -> Result<String, DomainError> {
+        Ok(sha256_hex(self.render_plain_text()?.as_bytes()))
     }
 }
 

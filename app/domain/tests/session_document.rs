@@ -36,6 +36,7 @@ fn session(ids: &[&str]) -> ExportSession {
         pages: ids.iter().map(|id| page(id)).collect(),
         document: None,
         ocr: Vec::new(),
+        ocr_text: false,
     }
 }
 
@@ -263,6 +264,7 @@ fn documented_fixture() -> (ExportPlan, ExportManifest, Vec<u8>) {
             .collect(),
         document: None,
         ocr: Vec::new(),
+        ocr_text: false,
     };
     let pdf = real_pdf(&[("a", 4, 3), ("b", 4, 3)]);
     s.document = Some(SessionDocument {

@@ -42,7 +42,11 @@
 //!   documents laid out at `ocr/<session>/<capture>.json` in page order,
 //!   bound into the manifest by content digest, and serialized by the
 //!   executor from the bound document (never host-supplied bytes) under the
-//!   same verify/finalize gates.
+//!   same verify/finalize gates;
+//! - an opt-in plain-text rendition of each bound completed OCR document
+//!   (`ocr/<session>/<capture>.txt`), rendered deterministically by the
+//!   executor from the same bound document, cross-checked against the
+//!   manifest's text digest, and never accepted as a host-supplied source.
 //!
 //! Evidence category: this is software code with unit/fixture tests on
 //! synthetic fixtures. It is not physical device integration evidence.
@@ -75,7 +79,7 @@ pub use manifest::{CaptureEntry, DeviceManifest, SessionManifest};
 pub use ocr::{
     OcrBlock, OcrFailureCode, OcrProvider, OcrResult, OcrSkipReason, OcrStatus,
     CONFIDENCE_PER_MILLE_MAX, MAX_LANGUAGE_ID_LEN, MAX_OCR_BLOCKS, MAX_OCR_DOCUMENT_BYTES,
-    MAX_OCR_LANGUAGES, MAX_OCR_TEXT_CHARS, OCR_SCHEMA_PREFIX,
+    MAX_OCR_LANGUAGES, MAX_OCR_TEXT_BYTES, MAX_OCR_TEXT_CHARS, OCR_SCHEMA_PREFIX,
 };
 pub use pdf::export_pdf;
 pub use processing::{

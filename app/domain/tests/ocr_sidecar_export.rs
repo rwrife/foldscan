@@ -40,6 +40,7 @@ fn session(ids: &[&str]) -> ExportSession {
         pages: ids.iter().map(|id| page(id)).collect(),
         document: None,
         ocr: Vec::new(),
+        ocr_text: false,
     }
 }
 
