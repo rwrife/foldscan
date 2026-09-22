@@ -286,11 +286,10 @@ fn validate_request_shape<'a>(
         .collect();
     for key in sources.keys() {
         if !content_paths.contains(key.as_str()) {
-            if plan
-                .files
-                .iter()
-                .any(|f| f.content_kind == ContentKind::Ocr && &f.relative_path == key)
-            {
+            if plan.files.iter().any(|f| {
+                matches!(f.content_kind, ContentKind::Ocr | ContentKind::OcrText)
+                    && &f.relative_path == key
+            }) {
                 return Err(DomainError::invalid_request(format!(
                     "ocr sidecar {} is serialized from the bound document, not from a source",
                     key
@@ -415,6 +414,16 @@ fn run_plan(
                 // written are exactly the reviewed document the manifest
                 // digest binds.
                 let bytes = ocr_document(session, file)?;
+                write_verified(root, file, &bytes)?;
+            }
+            ContentKind::OcrText => {
+                // Per-capture plain-text rendition: rendered from the same
+                // bound document as the JSON sidecar (never from a
+                // host-supplied source, rejected in
+                // validate_request_shape), and cross-checked here against
+                // the manifest's `ocr_text_digest` so the bytes on disk are
+                // provably the rendition the manifest pinned.
+                let bytes = ocr_text_document(session, manifest, file)?;
                 write_verified(root, file, &bytes)?;
             }
             ContentKind::Recipe => {
@@ -810,6 +819,57 @@ fn ocr_document(session: &ExportSession, file: &PlannedFile) -> Result<Vec<u8>, 
         ));
     }
     Ok(bytes)
+}
+
+/// Render the plain-text rendition for one planned `OcrText` file from the
+/// bound document and cross-check it against the manifest's declared text
+/// digest. The bytes come from the plan's session rendering, never from the
+/// host sources map; a mismatch between what the manifest pinned and what
+/// the bound document now renders (e.g. an edited plan over a mutated
+/// session) fails before anything is staged for this file.
+fn ocr_text_document(
+    session: &ExportSession,
+    manifest: &ExportManifest,
+    file: &PlannedFile,
+) -> Result<Vec<u8>, DomainError> {
+    let cid = file
+        .capture_id
+        .as_deref()
+        .ok_or_else(|| DomainError::internal("ocr text file without capture_id in plan"))?;
+    let doc = session
+        .ocr
+        .iter()
+        .find(|d| d.capture_id == cid)
+        .ok_or_else(|| {
+            DomainError::invalid_request(format!(
+                "ocr text rendition {} is not bound in the export session",
+                cid
+            ))
+        })?;
+    let text = doc.render_plain_text()?;
+    if text.len() > crate::ocr::MAX_OCR_TEXT_BYTES {
+        return Err(DomainError::internal(
+            "ocr text rendition exceeds its byte bound after rendering",
+        ));
+    }
+    let declared = manifest
+        .pages
+        .iter()
+        .find(|p| p.capture_id == cid)
+        .and_then(|p| p.ocr_text_digest.as_deref())
+        .ok_or_else(|| {
+            DomainError::invalid_request(format!(
+                "ocr text rendition {} has no manifest text digest",
+                cid
+            ))
+        })?;
+    if sha256_hex(text.as_bytes()) != declared {
+        return Err(DomainError::checksum_mismatch(format!(
+            "ocr text rendition for {} does not match the manifest text digest",
+            cid
+        )));
+    }
+    Ok(text.into_bytes())
 }
 
 /// Serialize the portable manifest and prove it round-trips through the

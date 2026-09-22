@@ -178,10 +178,25 @@ Implemented so far (issue #5, domain work in `app/domain`):
     bound document itself — never host-supplied bytes — through the same
     staged/verify/finalize gates with a read-back re-parse proof. Absence
     means byte-identical pre-slice exports. This is the export path for
-    OCR text; a plain-`.txt` rendering remains a follow-up. No OCR engine
-    exists. See [OCR sidecar evidence](domain/evidence/ocr-sidecar-export.md).
+    OCR text. No OCR engine exists. See
+    [OCR sidecar evidence](domain/evidence/ocr-sidecar-export.md).
 
-The crate is verified by 197 unit/fixture tests plus a clean
+13. OCR plain-text rendition export: an `ExportSession` may opt into
+    `ocr_text`, which lays out an additional `ocr/<session>/<capture>.txt`
+    for every bound completed OCR document, rendered deterministically by
+    `OcrResult::render_plain_text` (block texts in document order, one
+    newline after each; a completed no-text page renders to a single
+    newline). The manifest binds each rendition's SHA-256
+    (`ocr_text_digest`, present only alongside the JSON `ocr_digest`), and
+    the executor renders from the *bound document* — never host-supplied
+    text — cross-checking the manifest digest before writing, through the
+    same staged/verify/finalize/rollback gates. Opting out, or having no
+    OCR bindings, is byte-identical to pre-text exports; adding the
+    rendition never changes the `.json` sidecar or original bytes. No OCR
+    engine exists; geometric line re-flow remains out of scope. See
+    [OCR text export evidence](domain/evidence/ocr-text-export.md).
+
+The crate is verified by 220 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no physical
@@ -190,7 +205,7 @@ codec integration, corner detection, dewarp, an actual OCR engine, and the UI
 remain open work under this issue (PNG landed in slice 8; the PDF writer
 landed in slice 9; the OCR document core landed in slice 10; the session
 document export binding landed in slice 11; the OCR sidecar export binding
-landed in slice 12).
+landed in slice 12; the OCR plain-text rendition export landed in slice 13).
 
 ## Verification
 

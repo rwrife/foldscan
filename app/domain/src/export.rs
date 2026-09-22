@@ -103,6 +103,15 @@ pub struct ExportSession {
     /// as before this field existed. Each capture may appear at most once,
     /// and every entry must bind to a capture present in `pages`.
     pub ocr: Vec<crate::ocr::OcrResult>,
+    /// Opt-in rendering of each bound completed OCR document as an
+    /// additional plain-text sidecar (`ocr/<session>/<capture>.txt`,
+    /// issue #35). `false` means JSON sidecars only, byte-identical to
+    /// pre-text exports. Text is always *derived* by the executor from the
+    /// bound document — hosts never supply text bytes — so this flag can
+    /// only add renditions of text the session already binds, never new
+    /// content. Requires every OCR binding to remain completed; it changes
+    /// nothing when `ocr` is empty.
+    pub ocr_text: bool,
 }
 
 /// One capture's participation in a session-level document: which capture
@@ -285,6 +294,7 @@ pub fn export_sessions_from_import(sessions: &[ImportedSession]) -> Vec<ExportSe
                 .collect(),
             document: None,
             ocr: Vec::new(),
+            ocr_text: false,
         })
         .collect()
 }
@@ -333,6 +343,7 @@ pub enum ContentKind {
     Derivative,
     Document,
     Ocr,
+    OcrText,
     Recipe,
     Manifest,
 }
@@ -460,7 +471,10 @@ pub fn plan_export(
         // the whole binding list first (closed terminal status, known
         // captures, one sidecar per capture), then layout follows *session
         // page order* — not binding-list order — so the plan is identical
-        // however the host happens to order its OCR list.
+        // however the host happens to order its OCR list. With `ocr_text`
+        // opted in, the rendered `.txt` rendition follows its `.json`
+        // sidecar (still page order overall), so a consumer reading the
+        // plan sees each capture's text pair together.
         let ocr_index = validate_ocr_bindings(session)?;
         for page in &session.pages {
             if ocr_index.contains_key(page.capture_id.as_str()) {
@@ -472,6 +486,16 @@ pub fn plan_export(
                     Some(&page.capture_id),
                     ContentKind::Ocr,
                 )?;
+                if session.ocr_text {
+                    let txt_path = format!("{}/{}/{}.txt", OCR_DIR, sdir, page.capture_id);
+                    insert_path(
+                        &mut files,
+                        &mut seen_paths,
+                        txt_path,
+                        Some(&page.capture_id),
+                        ContentKind::OcrText,
+                    )?;
+                }
             }
         }
     }
@@ -652,6 +676,15 @@ pub struct ExportManifestPage {
     /// exactly *which* captures carry OCR text and *what* that text is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_digest: Option<String>,
+    /// SHA-256 of the plain-text rendering bytes
+    /// ([`crate::ocr::OcrResult::plain_text_digest`]) for this capture's
+    /// bound OCR document. Present iff the session opted into `ocr_text`
+    /// and lays out an `ocr/<session>/<capture>.txt` for it; absent means
+    /// no text rendition, byte-identical to pre-text manifests. The text is
+    /// derived from the same bound document `ocr_digest` pins, so the two
+    /// digests can never disagree about page text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_text_digest: Option<String>,
 }
 
 impl ExportManifest {
@@ -678,6 +711,15 @@ impl ExportManifest {
             .filter(|f| f.content_kind == ContentKind::Ocr)
             .map(|f| f.capture_id.as_deref().unwrap_or_default())
             .collect();
+        // Plain-text renditions planned for this session (issue #35). Same
+        // cross-check as the JSON sidecars: layout, bindings, and the
+        // session's opt-in flag must agree exactly, per capture.
+        let planned_ocr_text: std::collections::HashSet<&str> = plan
+            .files
+            .iter()
+            .filter(|f| f.content_kind == ContentKind::OcrText)
+            .map(|f| f.capture_id.as_deref().unwrap_or_default())
+            .collect();
         for page in &session.pages {
             let binds_ocr = ocr_index.contains_key(page.capture_id.as_str());
             let plans_ocr = planned_ocr.contains(page.capture_id.as_str());
@@ -686,12 +728,29 @@ impl ExportManifest {
                     "ocr sidecar layout does not match the session's ocr bindings",
                 ));
             }
+            let wants_text = binds_ocr && session.ocr_text;
+            let plans_text = planned_ocr_text.contains(page.capture_id.as_str());
+            if wants_text != plans_text {
+                return Err(DomainError::internal(
+                    "ocr text layout does not match the session's ocr text opt-in",
+                ));
+            }
             let ocr_digest = if binds_ocr {
                 Some(
                     ocr_index
                         .get(page.capture_id.as_str())
                         .expect("presence checked above")
                         .digest(),
+                )
+            } else {
+                None
+            };
+            let ocr_text_digest = if wants_text {
+                Some(
+                    ocr_index
+                        .get(page.capture_id.as_str())
+                        .expect("presence checked above")
+                        .plain_text_digest()?,
                 )
             } else {
                 None
@@ -736,6 +795,7 @@ impl ExportManifest {
                 processed_bytes: page.processed_bytes,
                 recipe_digest: page.recipe_digest.clone(),
                 ocr_digest,
+                ocr_text_digest,
             });
         }
 
@@ -832,6 +892,18 @@ impl ExportManifest {
             if let Some(digest) = &page.ocr_digest {
                 validate_checksum("ocr digest", digest)?;
             }
+            if let Some(digest) = &page.ocr_text_digest {
+                validate_checksum("ocr text digest", digest)?;
+                // A text rendition is a rendering of a bound document:
+                // text without the document digest would let a manifest
+                // claim a .txt for text the export never reviewed.
+                if page.ocr_digest.is_none() {
+                    return Err(DomainError::invalid_request(format!(
+                        "export page {} carries an ocr text digest without an ocr document digest",
+                        page.capture_id
+                    )));
+                }
+            }
             if let Some(bytes) = page.processed_bytes {
                 validate_processed_bytes(bytes)?;
             }
@@ -925,6 +997,7 @@ mod tests {
             pages: vec![page("cap-a"), page("cap-b"), page("cap-c")],
             document: None,
             ocr: Vec::new(),
+            ocr_text: false,
         }
     }
 

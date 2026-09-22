@@ -26,6 +26,7 @@ fn session(mask: u8) -> ExportSession {
         }],
         document: None,
         ocr: Vec::new(),
+        ocr_text: false,
     }
 }
 
