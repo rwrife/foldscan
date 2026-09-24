@@ -1,0 +1,68 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 44rem;
+  padding: 1.5rem;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+}
+
+.skip-link:focus {
+  left: 0.5rem;
+  top: 0.5rem;
+  background: Canvas;
+  color: CanvasText;
+  padding: 0.5rem 1rem;
+  z-index: 10;
+}
+
+:focus-visible {
+  outline: 3px solid Highlight;
+  outline-offset: 2px;
+}
+
+button {
+  font: inherit;
+  padding: 0.5rem 1.25rem;
+  border: 2px solid ButtonText;
+  background: ButtonFace;
+  color: ButtonText;
+  border-radius: 0.35rem;
+  cursor: pointer;
+}
+
+button:hover {
+  text-decoration: underline;
+}
+
+#status {
+  min-height: 1.6em;
+  font-size: 1.1rem;
+}
+
+footer {
+  margin-top: 3rem;
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  button {
+    border: 2px solid ButtonText;
+  }
+}

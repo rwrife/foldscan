@@ -1,0 +1,23 @@
+[package]
+name = "foldscan-companion"
+version = "0.1.0"
+edition = "2021"
+description = "FoldScan local-first desktop companion shell (Tauri 2 scaffold)"
+license = "MIT"
+
+# See version constraints: exact `=` pins, matching the app/domain convention.
+# `tauri` is pinned to the 2.x line tested in CI; the build script crate is
+# pinned alongside it.
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+foldscan-domain = { path = "../../domain" }
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.141"
+tauri = { version = "=2.11.6", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

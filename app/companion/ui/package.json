@@ -1,0 +1,19 @@
+{
+  "name": "foldscan-companion-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "FoldScan local companion desktop app UI (Tauri 2 scaffold, issue #37)",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "=2.11.1"
+  },
+  "devDependencies": {
+    "typescript": "=5.9.3",
+    "vite": "=8.3.0"
+  }
+}
