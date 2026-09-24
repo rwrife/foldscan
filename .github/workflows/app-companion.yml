@@ -1,0 +1,103 @@
+name: Companion app (Tauri scaffold)
+
+on:
+  pull_request:
+    paths:
+      - "app/companion/**"
+      - ".github/workflows/app-companion.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "app/companion/**"
+      - ".github/workflows/app-companion.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-companion-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui:
+    name: Build and typecheck the TypeScript UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/companion/ui/package-lock.json
+
+      - name: Install pinned dependencies
+        working-directory: app/companion/ui
+        run: npm ci
+
+      - name: Typecheck and production build
+        working-directory: app/companion/ui
+        run: npm run build
+
+  backend:
+    name: Build, lint, and test the Tauri shell (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Provide frontend placeholder for the compile-time context macro
+        # `tauri::generate_context!` requires `frontendDist` (../ui/dist) to
+        # exist when the shell crate compiles. The real frontend is built and
+        # type-checked in the `ui` job; this lane only compiles/tests the Rust
+        # shell, so a placeholder index.html satisfies the macro.
+        run: |
+          mkdir -p app/companion/ui/dist
+          printf '<!doctype html><html lang="en"><title>FoldScan placeholder</title></html>\n' \
+            > app/companion/ui/dist/index.html
+
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/companion/src-tauri/target
+            app/domain/target
+          key: ${{ runner.os }}-cargo-companion-${{ hashFiles('app/companion/src-tauri/Cargo.lock') }}
+
+      - name: Format check
+        working-directory: app/companion/src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        working-directory: app/companion/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tests
+        working-directory: app/companion/src-tauri
+        run: cargo test --locked

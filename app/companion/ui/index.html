@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FoldScan Companion</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <header role="banner">
+      <h1>FoldScan Companion</h1>
+      <p>Local-first document capture companion — scaffold build.</p>
+    </header>
+    <main id="main">
+      <section aria-labelledby="status-heading">
+        <h2 id="status-heading">Companion status</h2>
+        <p id="status" role="status" aria-live="polite">Checking companion status…</p>
+        <p>
+          <button id="refresh" type="button">Refresh status</button>
+        </p>
+      </section>
+    </main>
+    <footer role="contentinfo">
+      <p>Runs fully offline. No telemetry, no accounts.</p>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
