@@ -82,8 +82,11 @@ Not verified — explicitly out of scope for this scaffold:
 
 - The GUI window was never launched (no desktop session on the executor
   host); no screenshot, input, or screen-reader evidence exists yet.
-- No installers/bundles were produced (`bundle.active = false`; icon set not
-  chosen yet). Packaging, signing, and updater policy are later #5 slices.
+- No installers/bundles were produced (`bundle.active = false`). The
+  committed `icons/icon.png` is a generated placeholder: Tauri 2 requires a
+  real icon file to compile `tauri::generate_context!`, so the scaffold
+  carries a plain rounded square until branding assets are chosen. Platform
+  icon sets (.ico/.icns) and packaging/signing policy are later #5 slices.
 - Windows and macOS builds are not exercised by this CI workflow; only the
   Linux lane exists.
 - Accessibility is limited to structural hygiene in the scaffold (landmarks,
