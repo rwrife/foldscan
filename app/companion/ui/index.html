@@ -20,6 +20,32 @@
           <button id="refresh" type="button">Refresh status</button>
         </p>
       </section>
+
+      <section aria-labelledby="import-heading">
+        <h2 id="import-heading">Import probe</h2>
+        <p>
+          Validate a mounted removable-media path using the bounded
+          <code>foldscan-domain</code> import pipeline. This check is read-only.
+        </p>
+        <form id="import-form">
+          <label for="import-path">Mounted volume path</label>
+          <div class="input-row">
+            <input
+              id="import-path"
+              name="import-path"
+              type="text"
+              placeholder="/media/FOLDSCAN"
+              required
+              autocomplete="off"
+            />
+            <button type="submit">Check import path</button>
+          </div>
+        </form>
+        <p id="import-status" role="status" aria-live="polite">
+          Waiting for a path.
+        </p>
+        <div id="import-results" aria-live="polite"></div>
+      </section>
     </main>
     <footer role="contentinfo">
       <p>Runs fully offline. No telemetry, no accounts.</p>

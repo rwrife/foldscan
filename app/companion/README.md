@@ -5,10 +5,11 @@ Tauri 2 + Rust + TypeScript application with exact pinned dependencies,
 formatting/lint gates, tests, and clean CI builds on the Linux host this
 project can build.
 
-This scaffold intentionally contains **no UI workflows yet** — no import,
-review, processing, or export views. It contains one minimal accessible page
-that asks the Rust shell for a versioned status document and renders it as
-text, plus the CI wiring that keeps every later slice honest.
+This shell additionally exposes **one bounded import probe** (issue #39): the
+UI sends a mounted-volume path to `import_volume_summary`, the shell runs the
+already-tested `foldscan_domain::import_volume` pipeline, and the result is
+rendered as text (structured success summary or structured failure). It still
+contains **no review, processing, or export views**.
 
 ## Layout
 

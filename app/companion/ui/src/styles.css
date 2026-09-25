@@ -48,6 +48,38 @@ button:hover {
   font-size: 1.1rem;
 }
 
+.input-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.35rem;
+}
+
+input[type="text"] {
+  font: inherit;
+  flex: 1 1 18rem;
+  padding: 0.5rem;
+  border: 2px solid ButtonText;
+  border-radius: 0.35rem;
+  background: Field;
+  color: FieldText;
+}
+
+#import-status {
+  min-height: 1.6em;
+}
+
+#import-results ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+}
+
 footer {
   margin-top: 3rem;
   font-size: 0.9rem;
