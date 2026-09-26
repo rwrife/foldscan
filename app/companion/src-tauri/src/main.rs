@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! FoldScan companion desktop shell (issue #39).
+//! FoldScan companion desktop shell (issues #39 and #41).
 //!
 //! Scope: a buildable, linted, tested Tauri 2 shell that depends on the
 //! `foldscan-domain` crate by path and exposes:
@@ -154,6 +154,7 @@ fn import_volume_summary(volume_path: String) -> ImportResult {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             companion_status,
             import_volume_summary

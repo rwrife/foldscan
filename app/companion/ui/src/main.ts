@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 /** Must match `CompanionStatus` in `src-tauri/src/main.rs`. */
 interface CompanionStatus {
@@ -31,6 +32,7 @@ const statusElement = document.getElementById("status");
 const refreshButton = document.getElementById("refresh");
 const importForm = document.getElementById("import-form");
 const importPath = document.getElementById("import-path");
+const chooseFolderButton = document.getElementById("choose-folder");
 const importStatus = document.getElementById("import-status");
 const importResults = document.getElementById("import-results");
 
@@ -144,6 +146,48 @@ if (importForm instanceof HTMLFormElement && importPath instanceof HTMLInputElem
     void probeImport(path);
   });
   importPath.addEventListener("input", () => importPath.setCustomValidity(""));
+}
+
+async function chooseImportFolder(): Promise<void> {
+  if (
+    !(importPath instanceof HTMLInputElement) ||
+    !(chooseFolderButton instanceof HTMLButtonElement) ||
+    !importStatus
+  ) {
+    return;
+  }
+
+  chooseFolderButton.disabled = true;
+  importStatus.textContent = "Opening the system folder picker…";
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Choose the mounted FoldScan volume",
+    });
+    if (selected === null) {
+      importStatus.textContent =
+        "Folder selection cancelled. No import was started.";
+      return;
+    }
+
+    importPath.value = selected;
+    importPath.setCustomValidity("");
+    importStatus.textContent =
+      "Folder selected. Choose Check import path to validate it; no import has started.";
+    importPath.focus();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    importStatus.textContent = `Folder picker unavailable: ${reason}`;
+  } finally {
+    chooseFolderButton.disabled = false;
+  }
+}
+
+if (chooseFolderButton instanceof HTMLButtonElement) {
+  chooseFolderButton.addEventListener("click", () => {
+    void chooseImportFolder();
+  });
 }
 
 void refreshStatus();
