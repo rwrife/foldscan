@@ -5,11 +5,14 @@ Tauri 2 + Rust + TypeScript application with exact pinned dependencies,
 formatting/lint gates, tests, and clean CI builds on the Linux host this
 project can build.
 
-This shell additionally exposes **one bounded import probe** (issue #39): the
-UI sends a mounted-volume path to `import_volume_summary`, the shell runs the
-already-tested `foldscan_domain::import_volume` pipeline, and the result is
-rendered as text (structured success summary or structured failure). It still
-contains **no review, processing, or export views**.
+This shell additionally exposes **one bounded import probe** (issues #39 and
+#41): the user can choose a mounted-volume directory through the native system
+picker or enter its path manually. The UI sends that path to
+`import_volume_summary`, the shell runs the already-tested
+`foldscan_domain::import_volume` pipeline, and the result is rendered as text
+(structured success summary or structured failure). Selecting a directory does
+not start import or mutate it. The shell still contains **no review, processing,
+or export views**.
 
 ## Layout
 
@@ -30,6 +33,9 @@ app/companion/
 | `serde`      | `=1.0.219`   | matches `app/domain`               |
 | `serde_json` | `=1.0.141`   | matches `app/domain`               |
 | `@tauri-apps/api` | `=2.11.1` | UI → shell `invoke` boundary    |
+| `tauri-plugin-dialog` | `=2.7.0` | Rust native dialog plugin    |
+| `tauri-plugin-fs` | `=2.5.0` | Compatibility pin for Serde 1.0.219 |
+| `@tauri-apps/plugin-dialog` | `=2.7.0` | UI folder picker API   |
 | `typescript` | `=5.9.3`     | `tsc --noEmit` typecheck gate      |
 | `vite`       | `=8.3.0`     | dev server + production build      |
 
@@ -90,6 +96,9 @@ Not verified — explicitly out of scope for this scaffold:
   icon sets (.ico/.icns) and packaging/signing policy are later #5 slices.
 - Windows and macOS builds are not exercised by this CI workflow; only the
   Linux lane exists.
+- The native folder picker was not opened in the headless test environment;
+  mounted-volume, picker cancellation, and focus-return behavior need GUI
+  acceptance testing on supported desktops.
 - Accessibility is limited to structural hygiene in the scaffold (landmarks,
   `aria-live` status, visible focus, skip link, reduced-motion and
   forced-colors CSS); #5's accessibility acceptance testing is not done.
