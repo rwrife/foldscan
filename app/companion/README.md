@@ -5,14 +5,16 @@ Tauri 2 + Rust + TypeScript application with exact pinned dependencies,
 formatting/lint gates, tests, and clean CI builds on the Linux host this
 project can build.
 
-This shell additionally exposes **one bounded import probe** (issues #39 and
-#41): the user can choose a mounted-volume directory through the native system
-picker or enter its path manually. The UI sends that path to
-`import_volume_summary`, the shell runs the already-tested
-`foldscan_domain::import_volume` pipeline, and the result is rendered as text
-(structured success summary or structured failure). Selecting a directory does
-not start import or mutate it. The shell still contains **no review, processing,
-or export views**.
+This shell additionally exposes **one bounded import probe and in-memory review plan**
+(issues #39, #41, and #43): the user can choose a mounted-volume directory
+through the native system picker or enter its path manually. The UI sends that
+path to `import_volume_summary`, the shell runs the already-tested
+`foldscan_domain::import_volume` pipeline, and the verified captures are
+presented as an accessible, manifest-ordered capture list. Users can reorder
+captures, exclude individual items from export, and restore them without
+modifying or deleting any source files. Selecting a directory or manipulating the
+review plan does not run export or mutate the volume. The shell still contains
+**no image thumbnail decoding, image processing, or export execution views**.
 
 ## Layout
 
@@ -49,9 +51,15 @@ Frontend (from `app/companion/ui`, Node 22):
 
 ```bash
 npm ci
+npm test            # deterministic review-plan state tests
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc --noEmit && vite build -> dist/
 ```
+
+The review plan is intentionally ephemeral. A new import check replaces it,
+and closing the app discards it. `Remove` means remove from the prospective
+export order only; the verified source capture remains on the mounted volume.
+Reorder/remove/restore actions are native buttons and remain keyboard-operable.
 
 Shell (from `app/companion/src-tauri`, requires the Linux WebKitGTK
 prerequisite set — `libwebkit2gtk-4.1-dev` and friends, see the CI workflow):
@@ -67,8 +75,12 @@ needs a desktop session; CI does not launch a GUI.
 
 ## What CI verifies (`.github/workflows/app-companion.yml`)
 
-- `ui` job: `npm ci` from the committed lockfile, then `tsc --noEmit` + a
-  production Vite build on `ubuntu-latest` (Node 22).
+- `ui` job: `npm ci` from the committed lockfile, five deterministic
+  review-plan tests, then `tsc --noEmit` + a production Vite build on
+  `ubuntu-latest` (Node 22). The tests exercise initial manifest order,
+  movement and boundary behavior, remove/restore, and source-summary
+  immutability.
+
 - `backend` job: apt-install of the Tauri Linux prerequisites, then
   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
   and `cargo test --locked` against the shell crate (which compiles
@@ -79,11 +91,15 @@ needs a desktop session; CI does not launch a GUI.
 Verified locally on the executor host (Linux, headless, arm64) and in CI
 (`ubuntu-latest`, x86-64):
 
-- `npm ci`, `tsc --noEmit`, and the production Vite build.
+- `npm ci`, `npm test`, `tsc --noEmit`, and the production Vite build.
 - `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
   `cargo test --locked` for the shell crate (including its link against
   `foldscan-domain`), run inside an Ubuntu 24.04 Docker container with the
   WebKitGTK prerequisites installed.
+
+The added UI tests cover deterministic in-memory review-state transitions only
+(manifest-order initialization, move up/down boundaries, remove, restore,
+source-summary immutability). They are not export execution or device tests.
 
 Not verified — explicitly out of scope for this scaffold:
 
@@ -99,6 +115,9 @@ Not verified — explicitly out of scope for this scaffold:
 - The native folder picker was not opened in the headless test environment;
   mounted-volume, picker cancellation, and focus-return behavior need GUI
   acceptance testing on supported desktops.
+- The review-plan buttons were not exercised in a launched GUI; keyboard-only,
+  screen-reader, and focus-restore behavior of the rendered list need desktop
+  acceptance testing.
 - Accessibility is limited to structural hygiene in the scaffold (landmarks,
   `aria-live` status, visible focus, skip link, reduced-motion and
   forced-colors CSS); #5's accessibility acceptance testing is not done.

@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! FoldScan companion desktop shell (issues #39 and #41).
+//! FoldScan companion desktop shell (issues #39, #41, and #43).
 //!
 //! Scope: a buildable, linted, tested Tauri 2 shell that depends on the
 //! `foldscan-domain` crate by path and exposes:
 //! - [`companion_status`]: returns a versioned status document.
 //! - [`import_volume_summary`]: runs bounded validation/import over a volume root
-//!   and returns a structured, presentation-safe summary or structured failure.
+//!   and returns a structured, presentation-safe summary (including each
+//!   verified capture, in manifest order, for the UI review plan) or a
+//!   structured failure.
 
 use std::path::Path;
 
@@ -35,12 +37,20 @@ pub struct CompanionStatus {
     pub domain_protocol: String,
 }
 
-/// Compact per-session metrics for UI list presentation.
+/// One verified capture exposed for read-only review-plan construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImportedCaptureSummary {
+    pub capture_id: String,
+    pub bytes: u64,
+}
+
+/// Compact per-session metrics and manifest-ordered captures for UI review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImportedSessionSummary {
     pub session_id: String,
     pub capture_count: usize,
     pub total_bytes: u64,
+    pub captures: Vec<ImportedCaptureSummary>,
 }
 
 /// Structured summary of an imported volume root.
@@ -103,12 +113,21 @@ pub fn summarize_plan(plan: &ImportPlan) -> ImportSummary {
     for s in &plan.sessions {
         let count = s.captures.len();
         let bytes: u64 = s.captures.iter().map(|c| c.bytes).sum();
+        let captures = s
+            .captures
+            .iter()
+            .map(|capture| ImportedCaptureSummary {
+                capture_id: capture.capture_id.clone(),
+                bytes: capture.bytes,
+            })
+            .collect();
         total_captures = total_captures.saturating_add(count);
         total_bytes = total_bytes.saturating_add(bytes);
         sessions.push(ImportedSessionSummary {
             session_id: s.session_id.clone(),
             capture_count: count,
             total_bytes: bytes,
+            captures,
         });
     }
 
@@ -244,6 +263,12 @@ mod tests {
                 assert_eq!(summary.sessions[0].session_id, "sess-001");
                 assert_eq!(summary.sessions[0].capture_count, 1);
                 assert_eq!(summary.sessions[0].total_bytes, FAKE_JPEG.len() as u64);
+                assert_eq!(summary.sessions[0].captures.len(), 1);
+                assert_eq!(summary.sessions[0].captures[0].capture_id, "cap-1");
+                assert_eq!(
+                    summary.sessions[0].captures[0].bytes,
+                    FAKE_JPEG.len() as u64
+                );
             }
             ImportResult::Err { error } => {
                 panic!("expected success, got error: {:?}", error);
@@ -262,6 +287,52 @@ mod tests {
                 assert!(!error.message.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn session_summary_serializes_the_pinned_capture_list_shape() {
+        let summary = ImportSummary {
+            schema: IMPORT_SUMMARY_SCHEMA.to_string(),
+            device_id: "fs-1".to_string(),
+            firmware_version: "0.1.0".to_string(),
+            session_count: 1,
+            total_captures: 2,
+            total_bytes: 30,
+            sessions: vec![ImportedSessionSummary {
+                session_id: "sess-1".to_string(),
+                capture_count: 2,
+                total_bytes: 30,
+                captures: vec![
+                    ImportedCaptureSummary {
+                        capture_id: "cap-a".to_string(),
+                        bytes: 10,
+                    },
+                    ImportedCaptureSummary {
+                        capture_id: "cap-b".to_string(),
+                        bytes: 20,
+                    },
+                ],
+            }],
+        };
+        let value = serde_json::to_value(summary).expect("serialization is infallible");
+        let session = &value["sessions"][0];
+        assert_eq!(session["session_id"], "sess-1");
+        assert_eq!(session["capture_count"], 2);
+        assert_eq!(session["total_bytes"], 30);
+        // The review plan consumes `captures` in array order; pin the shape so
+        // the UI contract cannot drift silently.
+        assert!(session["captures"].is_array());
+        let mut keys: Vec<&str> = session["captures"][0]
+            .as_object()
+            .expect("capture is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["bytes", "capture_id"]);
+        assert_eq!(session["captures"][0]["capture_id"], "cap-a");
+        assert_eq!(session["captures"][0]["bytes"], 10);
+        assert_eq!(session["captures"][1]["capture_id"], "cap-b");
     }
 
     #[test]

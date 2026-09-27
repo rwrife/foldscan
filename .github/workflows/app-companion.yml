@@ -39,6 +39,10 @@ jobs:
         working-directory: app/companion/ui
         run: npm ci
 
+      - name: Review-plan unit tests
+        working-directory: app/companion/ui
+        run: npm test
+
       - name: Typecheck and production build
         working-directory: app/companion/ui
         run: npm run build
