@@ -51,7 +51,7 @@ Frontend (from `app/companion/ui`, Node 22):
 
 ```bash
 npm ci
-npm test            # deterministic review-plan state tests
+npm test            # review-plan state + axe WCAG semantic regression tests
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc --noEmit && vite build -> dist/
 ```
@@ -76,10 +76,14 @@ needs a desktop session; CI does not launch a GUI.
 ## What CI verifies (`.github/workflows/app-companion.yml`)
 
 - `ui` job: `npm ci` from the committed lockfile, five deterministic
-  review-plan tests, then `tsc --noEmit` + a production Vite build on
-  `ubuntu-latest` (Node 22). The tests exercise initial manifest order,
-  movement and boundary behavior, remove/restore, and source-summary
-  immutability.
+  review-plan tests, three accessibility-regression tests, then `tsc
+  --noEmit` + a production Vite build on `ubuntu-latest` (Node 22). The
+  review tests exercise initial manifest order, movement and boundary
+  behavior, remove/restore, and source-summary immutability. The exact-pinned
+  `axe-core`/`jsdom` audit checks the real initial `index.html` and a
+  representative populated import/review DOM against applicable WCAG 2.0/2.1
+  A/AA rules. A canary proves an unlabeled button fails with rule and selector
+  evidence.
 
 - `backend` job: apt-install of the Tauri Linux prerequisites, then
   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
@@ -97,9 +101,11 @@ Verified locally on the executor host (Linux, headless, arm64) and in CI
   `foldscan-domain`), run inside an Ubuntu 24.04 Docker container with the
   WebKitGTK prerequisites installed.
 
-The added UI tests cover deterministic in-memory review-state transitions only
-(manifest-order initialization, move up/down boundaries, remove, restore,
-source-summary immutability). They are not export execution or device tests.
+The UI tests cover deterministic in-memory review-state transitions and
+headless semantic accessibility regressions. They are not export execution,
+GUI, assistive-technology, or device tests. `color-contrast` is deliberately
+excluded from the jsdom axe run because jsdom has no rendered pixels; contrast
+requires a real browser/desktop acceptance pass rather than a false static pass.
 
 Not verified — explicitly out of scope for this scaffold:
 
@@ -118,9 +124,12 @@ Not verified — explicitly out of scope for this scaffold:
 - The review-plan buttons were not exercised in a launched GUI; keyboard-only,
   screen-reader, and focus-restore behavior of the rendered list need desktop
   acceptance testing.
-- Accessibility is limited to structural hygiene in the scaffold (landmarks,
-  `aria-live` status, visible focus, skip link, reduced-motion and
-  forced-colors CSS); #5's accessibility acceptance testing is not done.
+- Automated accessibility evidence is limited to axe-detectable semantic
+  structure in the initial and representative populated states. Native picker
+  focus return, keyboard journeys in a launched WebView, screen-reader output,
+  rendered contrast, high contrast/forced colors, reduced motion, and 200%
+  zoom/reflow still need GUI acceptance testing; #5's accessibility acceptance
+  criterion is not complete.
 
 ## Roadmap back to #5
 

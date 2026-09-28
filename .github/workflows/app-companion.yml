@@ -39,7 +39,7 @@ jobs:
         working-directory: app/companion/ui
         run: npm ci
 
-      - name: Review-plan unit tests
+      - name: Review-plan and accessibility unit tests
         working-directory: app/companion/ui
         run: npm test
 
