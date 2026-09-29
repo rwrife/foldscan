@@ -19,6 +19,12 @@ export interface ReviewPlan {
   sessions: ReviewSession[];
 }
 
+export interface ExportPreviewRequest {
+  volumePath: string;
+  sessionId: string;
+  captureIds: string[];
+}
+
 export interface ImportSummaryCapture {
   capture_id: string;
   bytes: number;
@@ -49,6 +55,17 @@ function buildSession(source: ImportSummarySession): ReviewSession {
 export function createReviewPlan(summary: ImportSummarySource): ReviewPlan {
   return {
     sessions: summary.sessions.map(buildSession),
+  };
+}
+
+export function createExportPreviewRequest(
+  volumePath: string,
+  session: ReviewSession,
+): ExportPreviewRequest {
+  return {
+    volumePath,
+    sessionId: session.sessionId,
+    captureIds: session.active.map((capture) => capture.captureId),
   };
 }
 

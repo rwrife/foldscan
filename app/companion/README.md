@@ -5,15 +5,20 @@ Tauri 2 + Rust + TypeScript application with exact pinned dependencies,
 formatting/lint gates, tests, and clean CI builds on the Linux host this
 project can build.
 
-This shell additionally exposes **one bounded import probe and in-memory review plan**
-(issues #39, #41, and #43): the user can choose a mounted-volume directory
-through the native system picker or enter its path manually. The UI sends that
-path to `import_volume_summary`, the shell runs the already-tested
-`foldscan_domain::import_volume` pipeline, and the verified captures are
-presented as an accessible, manifest-ordered capture list. Users can reorder
-captures, exclude individual items from export, and restore them without
-modifying or deleting any source files. Selecting a directory or manipulating the
-review plan does not run export or mutate the volume. The shell still contains
+This shell additionally exposes **one bounded import probe, in-memory review plan,
+and read-only export preview** (issues #39, #41, #43, and #47): the user can
+choose a mounted-volume directory through the native system picker or enter its
+path manually. The UI sends that path to `import_volume_summary`, the shell runs
+the already-tested `foldscan_domain::import_volume` pipeline, and the verified
+captures are presented as an accessible, manifest-ordered capture list. Users
+can reorder captures, exclude individual items from export, and restore them
+without modifying or deleting any source files. Each reviewed session carries a
+`Preview export` button that sends its session ID and active capture order to
+`preview_export_plan`; the shell re-runs the bounded import, validates the
+selection, and returns the canonical planned export files (originals in
+reviewed order plus `export.json`) and the manifest integrity digest — writing
+nothing. Selecting a directory, manipulating the review plan, or previewing an
+export does not run export or mutate the volume. The shell still contains
 **no image thumbnail decoding, image processing, or export execution views**.
 
 ## Layout
@@ -75,20 +80,20 @@ needs a desktop session; CI does not launch a GUI.
 
 ## What CI verifies (`.github/workflows/app-companion.yml`)
 
-- `ui` job: `npm ci` from the committed lockfile, five deterministic
-  review-plan tests, three accessibility-regression tests, then `tsc
-  --noEmit` + a production Vite build on `ubuntu-latest` (Node 22). The
-  review tests exercise initial manifest order, movement and boundary
-  behavior, remove/restore, and source-summary immutability. The exact-pinned
-  `axe-core`/`jsdom` audit checks the real initial `index.html` and a
-  representative populated import/review DOM against applicable WCAG 2.0/2.1
-  A/AA rules. A canary proves an unlabeled button fails with rule and selector
-  evidence.
+- `ui` job: `npm ci` from the committed lockfile, six deterministic
+  review-plan and request tests, three accessibility-regression tests, then
+  `tsc --noEmit` + a production Vite build on `ubuntu-latest` (Node 22). The
+  review tests exercise initial manifest order, export preview request
+  construction, movement and boundary behavior, remove/restore, and
+  source-summary immutability. The exact-pinned `axe-core`/`jsdom` audit checks
+  the real initial `index.html` and a representative populated import, review,
+  and export-preview DOM against applicable WCAG 2.0/2.1 A/AA rules. A canary
+  proves an unlabeled button fails with rule and selector evidence.
 
 - `backend` job: apt-install of the Tauri Linux prerequisites, then
   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
   and `cargo test --locked` against the shell crate (which compiles
-  `foldscan-domain` via path).
+  `foldscan-domain` via path and exercises the 10 shell unit tests).
 
 ## Verified / not verified (honesty box)
 
@@ -101,11 +106,15 @@ Verified locally on the executor host (Linux, headless, arm64) and in CI
   `foldscan-domain`), run inside an Ubuntu 24.04 Docker container with the
   WebKitGTK prerequisites installed.
 
-The UI tests cover deterministic in-memory review-state transitions and
-headless semantic accessibility regressions. They are not export execution,
-GUI, assistive-technology, or device tests. `color-contrast` is deliberately
-excluded from the jsdom axe run because jsdom has no rendered pixels; contrast
-requires a real browser/desktop acceptance pass rather than a false static pass.
+The UI tests cover deterministic in-memory review-state transitions, reviewed
+request construction, and headless semantic accessibility regressions. Rust
+fixture tests prove that the preview re-imports source metadata, rejects stale,
+duplicate, empty, and unknown selections, preserves reviewed order, and returns
+the domain planner's canonical files and manifest digest without creating a
+destination. They are not export execution, GUI, assistive-technology, mounted
+media, or device tests. `color-contrast` is deliberately excluded from the
+jsdom axe run because jsdom has no rendered pixels; contrast requires a real
+browser/desktop acceptance pass rather than a false static pass.
 
 Not verified — explicitly out of scope for this scaffold:
 
@@ -121,9 +130,12 @@ Not verified — explicitly out of scope for this scaffold:
 - The native folder picker was not opened in the headless test environment;
   mounted-volume, picker cancellation, and focus-return behavior need GUI
   acceptance testing on supported desktops.
-- The review-plan buttons were not exercised in a launched GUI; keyboard-only,
-  screen-reader, and focus-restore behavior of the rendered list need desktop
-  acceptance testing.
+- The review-plan and export-preview buttons were not exercised in a launched
+  GUI; keyboard-only, screen-reader, and focus-restore behavior of the rendered
+  list and preview status need desktop acceptance testing.
+- No destination was selected and no export was executed. The preview proves
+  planning only; filesystem materialization, cancellation, rollback, and output
+  inspection remain separate integration/GUI work.
 - Automated accessibility evidence is limited to axe-detectable semantic
   structure in the initial and representative populated states. Native picker
   focus return, keyboard journeys in a launched WebView, screen-reader output,

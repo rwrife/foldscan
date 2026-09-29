@@ -57,7 +57,10 @@ function renderRepresentativeImportAndReview(document) {
   const importStatus = document.getElementById("import-status");
   const importResults = document.getElementById("import-results");
   const reviewPlan = document.getElementById("review-plan");
+  const exportPreviewStatus = document.getElementById("export-preview-status");
+  const exportPreviewResults = document.getElementById("export-preview-results");
   assert.ok(importStatus && importResults && reviewPlan);
+  assert.ok(exportPreviewStatus && exportPreviewResults);
 
   importStatus.textContent =
     "Import ready for device fixture-device: 1 session, 2 captures. No source files were changed.";
@@ -115,7 +118,24 @@ function renderRepresentativeImportAndReview(document) {
   removed.append(removedItem);
   session.append(removedHeading, removed);
 
+  const previewButton = document.createElement("button");
+  previewButton.type = "button";
+  previewButton.textContent = "Preview export for fixture-session";
+  session.append(previewButton);
+
   reviewPlan.replaceChildren(note, session);
+
+  exportPreviewStatus.textContent =
+    "Export preview ready for session fixture-session: 2 captures, 3 planned files. Manifest digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef. No files were written.";
+  const previewHeading = document.createElement("h3");
+  previewHeading.textContent = "Canonical files for fixture-session";
+  const previewList = document.createElement("ul");
+  const file1 = document.createElement("li");
+  file1.textContent = "originals/fixture-session/capture-001.jpg (original, capture capture-001)";
+  const file2 = document.createElement("li");
+  file2.textContent = "export.json (manifest)";
+  previewList.append(file1, file2);
+  exportPreviewResults.replaceChildren(previewHeading, previewList);
 }
 
 test("the initial companion document has no detectable WCAG A/AA violations", async () => {

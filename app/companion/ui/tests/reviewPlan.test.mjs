@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createExportPreviewRequest,
   createReviewPlan,
   moveCapture,
   removeCapture,
@@ -35,6 +36,19 @@ test("a review plan preserves manifest order for every session", () => {
   const plan = createReviewPlan(source);
   assert.deepEqual(ids(plan, "sess-a"), ["cap-1", "cap-2", "cap-3"]);
   assert.deepEqual(ids(plan, "sess-b"), ["cap-4"]);
+});
+
+test("an export preview request preserves the reviewed active order and volume path", () => {
+  let plan = createReviewPlan(source);
+  plan = moveCapture(plan, "sess-a", "cap-3", -1);
+  plan = removeCapture(plan, "sess-a", "cap-1");
+  const session = plan.sessions.find((entry) => entry.sessionId === "sess-a");
+
+  assert.deepEqual(createExportPreviewRequest("/media/FOLDSCAN", session), {
+    volumePath: "/media/FOLDSCAN",
+    sessionId: "sess-a",
+    captureIds: ["cap-3", "cap-2"],
+  });
 });
 
 test("moving a capture is immutable and clamped at both boundaries", () => {

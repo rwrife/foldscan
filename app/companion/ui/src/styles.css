@@ -110,6 +110,15 @@ button:disabled {
   text-decoration: none;
 }
 
+#export-preview-results ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.review-session > button[data-action="preview-export"] {
+  margin-top: 0.25rem;
+}
+
 label {
   display: block;
   font-weight: 600;
