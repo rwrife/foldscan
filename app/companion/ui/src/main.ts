@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
+  createExportPreviewRequest,
   createReviewPlan,
   moveCapture,
   removeCapture,
@@ -42,6 +43,25 @@ type ImportResult =
   | { status: "ok"; summary: ImportSummary }
   | { status: "err"; error: { category: string; message: string } };
 
+interface ExportPreviewFile {
+  relative_path: string;
+  capture_id: string | null;
+  content_kind: string;
+}
+
+interface ExportPreview {
+  schema: string;
+  manifest_schema: string;
+  session_id: string;
+  capture_ids: string[];
+  files: ExportPreviewFile[];
+  manifest_digest: string;
+}
+
+type ExportPreviewResult =
+  | { status: "ok"; preview: ExportPreview }
+  | { status: "err"; error: { category: string; message: string } };
+
 const statusElement = document.getElementById("status");
 const refreshButton = document.getElementById("refresh");
 const importForm = document.getElementById("import-form");
@@ -50,9 +70,12 @@ const chooseFolderButton = document.getElementById("choose-folder");
 const importStatus = document.getElementById("import-status");
 const importResults = document.getElementById("import-results");
 const reviewPlanElement = document.getElementById("review-plan");
+const exportPreviewStatus = document.getElementById("export-preview-status");
+const exportPreviewResults = document.getElementById("export-preview-results");
 
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
+let currentVolumePath = "";
 
 function renderStatus(text: string): void {
   if (statusElement) {
@@ -194,16 +217,104 @@ function renderReviewPlan(): void {
       section.append(removedList);
     }
 
+    const previewButton = document.createElement("button");
+    previewButton.type = "button";
+    previewButton.textContent = `Preview export for ${session.sessionId}`;
+    previewButton.dataset.action = "preview-export";
+    previewButton.dataset.sessionId = session.sessionId;
+    previewButton.disabled = session.active.length === 0;
+    section.append(previewButton);
+
     reviewPlanElement.append(section);
+  }
+}
+
+function clearExportPreview(): void {
+  if (exportPreviewStatus) {
+    exportPreviewStatus.textContent =
+      "Run an import check, then preview a session's export layout.";
+  }
+  if (exportPreviewResults) {
+    exportPreviewResults.replaceChildren();
+  }
+}
+
+function renderExportPreview(result: ExportPreviewResult): void {
+  if (!exportPreviewStatus || !exportPreviewResults) {
+    return;
+  }
+  exportPreviewResults.replaceChildren();
+
+  if (result.status === "err") {
+    exportPreviewStatus.textContent = `Export preview failed (${result.error.category}): ${result.error.message}`;
+    return;
+  }
+
+  const preview = result.preview;
+  exportPreviewStatus.textContent =
+    `Export preview ready for session ${preview.session_id}: ` +
+    `${preview.capture_ids.length} ${plural(preview.capture_ids.length, "capture")}, ` +
+    `${preview.files.length} planned files. Manifest digest ${preview.manifest_digest}. No files were written.`;
+
+  const heading = document.createElement("h3");
+  heading.textContent = `Canonical files for ${preview.session_id}`;
+  const list = document.createElement("ul");
+  for (const file of preview.files) {
+    const item = document.createElement("li");
+    const label = file.capture_id ? `${file.relative_path} (${file.content_kind}, capture ${file.capture_id})` : `${file.relative_path} (${file.content_kind})`;
+    item.textContent = label;
+    list.append(item);
+  }
+  exportPreviewResults.append(heading, list);
+}
+
+async function previewExport(sessionId: string): Promise<void> {
+  if (!exportPreviewStatus || !exportPreviewResults) {
+    return;
+  }
+  if (!currentPlan) {
+    exportPreviewStatus.textContent = "Run an import check before previewing export.";
+    return;
+  }
+  const session = currentPlan.sessions.find((s) => s.sessionId === sessionId);
+  if (!session) {
+    exportPreviewStatus.textContent = `Session ${sessionId} not found in review plan.`;
+    return;
+  }
+  if (session.active.length === 0) {
+    exportPreviewStatus.textContent = `Session ${sessionId} has no active captures in its review plan.`;
+    return;
+  }
+  if (!currentVolumePath) {
+    exportPreviewStatus.textContent = "Volume path is missing. Run an import check first.";
+    return;
+  }
+
+  exportPreviewStatus.textContent = `Previewing canonical export layout for session ${sessionId}…`;
+  exportPreviewResults.replaceChildren();
+
+  const req = createExportPreviewRequest(currentVolumePath, session);
+  try {
+    const result = await invoke<ExportPreviewResult>("preview_export_plan", {
+      volumePath: req.volumePath,
+      sessionId: req.sessionId,
+      captureIds: req.captureIds,
+    });
+    renderExportPreview(result);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    exportPreviewStatus.textContent = `Export preview command unavailable: ${reason}`;
   }
 }
 
 function clearImportDetails(): void {
   currentSummary = null;
   currentPlan = null;
+  currentVolumePath = "";
   if (importResults) {
     importResults.replaceChildren();
   }
+  clearExportPreview();
   renderReviewPlan();
 }
 
@@ -223,6 +334,13 @@ function renderImportResult(result: ImportResult): void {
   const summary = result.summary;
   currentSummary = summary;
   currentPlan = createReviewPlan(summary);
+  clearExportPreview();
+  if (exportPreviewStatus) {
+    exportPreviewStatus.textContent =
+      summary.session_count === 0
+        ? "The imported volume has no sessions to preview."
+        : "Review a session, then choose its Preview export button.";
+  }
 
   importStatus.textContent =
     `Import ready for device ${summary.device_id}, firmware ${summary.firmware_version}: ` +
@@ -266,6 +384,7 @@ async function probeImport(path: string): Promise<void> {
   importStatus.textContent = "Checking the selected removable-media path…";
   importResults.replaceChildren();
   clearImportDetails();
+  currentVolumePath = path;
   try {
     const result = await invoke<ImportResult>("import_volume_summary", {
       volumePath: path,
@@ -349,27 +468,47 @@ if (reviewPlanElement) {
     }
 
     const { action, sessionId, captureId } = target.dataset;
-    if (!action || !sessionId || !captureId) {
+    if (!action || !sessionId) {
       return;
     }
 
     switch (action) {
+      case "preview-export":
+        void previewExport(sessionId);
+        return;
       case "move-up":
+        if (!captureId) {
+          return;
+        }
         currentPlan = moveCapture(currentPlan, sessionId, captureId, -1);
         break;
       case "move-down":
+        if (!captureId) {
+          return;
+        }
         currentPlan = moveCapture(currentPlan, sessionId, captureId, 1);
         break;
       case "remove":
+        if (!captureId) {
+          return;
+        }
         currentPlan = removeCapture(currentPlan, sessionId, captureId);
         break;
       case "restore":
+        if (!captureId) {
+          return;
+        }
         currentPlan = restoreCapture(currentPlan, sessionId, captureId);
         break;
       default:
         return;
     }
 
+    clearExportPreview();
+    if (exportPreviewStatus) {
+      exportPreviewStatus.textContent =
+        "Review plan changed. Preview the session again to refresh the canonical layout.";
+    }
     renderReviewPlan();
   });
 }
