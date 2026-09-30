@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
+  createExportExecutionRequest,
   createExportPreviewRequest,
   createReviewPlan,
   moveCapture,
@@ -62,6 +63,20 @@ type ExportPreviewResult =
   | { status: "ok"; preview: ExportPreview }
   | { status: "err"; error: { category: string; message: string } };
 
+interface ExportExecutionSummary {
+  schema: string;
+  session_id: string;
+  capture_ids: string[];
+  root: string;
+  files_written: number;
+  manifest_sha256: string;
+  manifest_digest: string;
+}
+
+type ExportExecutionResult =
+  | { status: "ok"; execution: ExportExecutionSummary }
+  | { status: "err"; error: { category: string; message: string } };
+
 const statusElement = document.getElementById("status");
 const refreshButton = document.getElementById("refresh");
 const importForm = document.getElementById("import-form");
@@ -72,6 +87,8 @@ const importResults = document.getElementById("import-results");
 const reviewPlanElement = document.getElementById("review-plan");
 const exportPreviewStatus = document.getElementById("export-preview-status");
 const exportPreviewResults = document.getElementById("export-preview-results");
+const exportStatus = document.getElementById("export-status");
+const exportResults = document.getElementById("export-results");
 
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
@@ -225,6 +242,14 @@ function renderReviewPlan(): void {
     previewButton.disabled = session.active.length === 0;
     section.append(previewButton);
 
+    const exportButton = document.createElement("button");
+    exportButton.type = "button";
+    exportButton.textContent = `Export ${session.sessionId} to folder…`;
+    exportButton.dataset.action = "export-to-folder";
+    exportButton.dataset.sessionId = session.sessionId;
+    exportButton.disabled = session.active.length === 0;
+    section.append(exportButton);
+
     reviewPlanElement.append(section);
   }
 }
@@ -307,6 +332,102 @@ async function previewExport(sessionId: string): Promise<void> {
   }
 }
 
+function clearExportExecution(): void {
+  if (exportStatus) {
+    exportStatus.textContent =
+      "Run an import check, review a session, then choose a destination folder to export it.";
+  }
+  if (exportResults) {
+    exportResults.replaceChildren();
+  }
+}
+
+function renderExportExecution(result: ExportExecutionResult): void {
+  if (!exportStatus || !exportResults) {
+    return;
+  }
+  exportResults.replaceChildren();
+
+  if (result.status === "err") {
+    exportStatus.textContent = `Export failed (${result.error.category}): ${result.error.message}`;
+    return;
+  }
+
+  const execution = result.execution;
+  exportStatus.textContent =
+    `Export complete for session ${execution.session_id}: ` +
+    `${execution.files_written} ${plural(execution.files_written, "file")} written to ${execution.root}. ` +
+    `Manifest digest ${execution.manifest_digest}. Source files were not modified.`;
+
+  const heading = document.createElement("h3");
+  heading.textContent = `Exported pages for ${execution.session_id}`;
+  const list = document.createElement("ol");
+  for (const captureId of execution.capture_ids) {
+    const item = document.createElement("li");
+    item.textContent = captureId;
+    list.append(item);
+  }
+  exportResults.append(heading, list);
+}
+
+async function exportSessionToFolder(sessionId: string): Promise<void> {
+  if (!exportStatus || !exportResults) {
+    return;
+  }
+  if (!currentPlan) {
+    exportStatus.textContent = "Run an import check before exporting.";
+    return;
+  }
+  const session = currentPlan.sessions.find((s) => s.sessionId === sessionId);
+  if (!session) {
+    exportStatus.textContent = `Session ${sessionId} not found in review plan.`;
+    return;
+  }
+  if (session.active.length === 0) {
+    exportStatus.textContent = `Session ${sessionId} has no active captures in its review plan.`;
+    return;
+  }
+  if (!currentVolumePath) {
+    exportStatus.textContent = "Volume path is missing. Run an import check first.";
+    return;
+  }
+
+  exportStatus.textContent = "Opening the system destination folder picker…";
+  exportResults.replaceChildren();
+  let destinationPath: string;
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: `Choose the destination folder for session ${sessionId}`,
+    });
+    if (selected === null) {
+      exportStatus.textContent = "Export cancelled. Nothing was written.";
+      return;
+    }
+    destinationPath = selected;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    exportStatus.textContent = `Folder picker unavailable: ${reason}`;
+    return;
+  }
+
+  exportStatus.textContent = `Exporting session ${sessionId} into ${destinationPath}…`;
+  const req = createExportExecutionRequest(currentVolumePath, destinationPath, session);
+  try {
+    const result = await invoke<ExportExecutionResult>("execute_export_plan", {
+      volumePath: req.volumePath,
+      destinationPath: req.destinationPath,
+      sessionId: req.sessionId,
+      captureIds: req.captureIds,
+    });
+    renderExportExecution(result);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    exportStatus.textContent = `Export command unavailable: ${reason}`;
+  }
+}
+
 function clearImportDetails(): void {
   currentSummary = null;
   currentPlan = null;
@@ -315,6 +436,7 @@ function clearImportDetails(): void {
     importResults.replaceChildren();
   }
   clearExportPreview();
+  clearExportExecution();
   renderReviewPlan();
 }
 
@@ -475,6 +597,9 @@ if (reviewPlanElement) {
     switch (action) {
       case "preview-export":
         void previewExport(sessionId);
+        return;
+      case "export-to-folder":
+        void exportSessionToFolder(sessionId);
         return;
       case "move-up":
         if (!captureId) {

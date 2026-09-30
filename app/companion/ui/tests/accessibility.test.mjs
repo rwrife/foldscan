@@ -59,8 +59,11 @@ function renderRepresentativeImportAndReview(document) {
   const reviewPlan = document.getElementById("review-plan");
   const exportPreviewStatus = document.getElementById("export-preview-status");
   const exportPreviewResults = document.getElementById("export-preview-results");
+  const exportStatus = document.getElementById("export-status");
+  const exportResults = document.getElementById("export-results");
   assert.ok(importStatus && importResults && reviewPlan);
   assert.ok(exportPreviewStatus && exportPreviewResults);
+  assert.ok(exportStatus && exportResults);
 
   importStatus.textContent =
     "Import ready for device fixture-device: 1 session, 2 captures. No source files were changed.";
@@ -123,6 +126,11 @@ function renderRepresentativeImportAndReview(document) {
   previewButton.textContent = "Preview export for fixture-session";
   session.append(previewButton);
 
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.textContent = "Export fixture-session to folder…";
+  session.append(exportButton);
+
   reviewPlan.replaceChildren(note, session);
 
   exportPreviewStatus.textContent =
@@ -136,6 +144,18 @@ function renderRepresentativeImportAndReview(document) {
   file2.textContent = "export.json (manifest)";
   previewList.append(file1, file2);
   exportPreviewResults.replaceChildren(previewHeading, previewList);
+
+  exportStatus.textContent =
+    "Export complete for session fixture-session: 3 files written to /home/user/exports/foldscan-export-fixture-session-0123456789ab. Manifest digest 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef. Source files were not modified.";
+  const exportHeading = document.createElement("h3");
+  exportHeading.textContent = "Exported pages for fixture-session";
+  const exportList = document.createElement("ol");
+  for (const captureId of ["capture-001", "capture-002"]) {
+    const item = document.createElement("li");
+    item.textContent = captureId;
+    exportList.append(item);
+  }
+  exportResults.replaceChildren(exportHeading, exportList);
 }
 
 test("the initial companion document has no detectable WCAG A/AA violations", async () => {

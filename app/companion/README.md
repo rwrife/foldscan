@@ -6,7 +6,8 @@ formatting/lint gates, tests, and clean CI builds on the Linux host this
 project can build.
 
 This shell additionally exposes **one bounded import probe, in-memory review plan,
-and read-only export preview** (issues #39, #41, #43, and #47): the user can
+read-only export preview, and real single-session export execution** (issues
+#39, #41, #43, #47, and #49): the user can
 choose a mounted-volume directory through the native system picker or enter its
 path manually. The UI sends that path to `import_volume_summary`, the shell runs
 the already-tested `foldscan_domain::import_volume` pipeline, and the verified
@@ -17,9 +18,19 @@ without modifying or deleting any source files. Each reviewed session carries a
 `preview_export_plan`; the shell re-runs the bounded import, validates the
 selection, and returns the canonical planned export files (originals in
 reviewed order plus `export.json`) and the manifest integrity digest — writing
-nothing. Selecting a directory, manipulating the review plan, or previewing an
-export does not run export or mutate the volume. The shell still contains
-**no image thumbnail decoding, image processing, or export execution views**.
+nothing. Each session also carries an `Export … to folder…` button: it opens the
+native destination-folder picker and invokes `execute_export_plan`, which
+re-validates the selection against a fresh bounded import, rebuilds the
+canonical original-only plan and manifest, and runs the durable domain executor
+(`foldscan_domain::executor::execute_export`). The executor stages every file,
+verifies size/checksum/read-back, finalizes atomically, writes the portable
+`export.json` manifest last, rolls back the export tree on any failure, and
+refuses to overwrite an existing export root. The destination subdirectory is
+deterministic (`foldscan-export-<session>-<12-hex-digest-prefix>`), so
+re-running an identical reviewed export is refused rather than duplicating
+bytes. Source originals are re-read from the importer's verified host paths and
+are never modified. The shell still contains
+**no image thumbnail decoding, image processing, or cancellation/progress UI**.
 
 ## Layout
 
@@ -80,20 +91,22 @@ needs a desktop session; CI does not launch a GUI.
 
 ## What CI verifies (`.github/workflows/app-companion.yml`)
 
-- `ui` job: `npm ci` from the committed lockfile, six deterministic
+- `ui` job: `npm ci` from the committed lockfile, seven deterministic
   review-plan and request tests, three accessibility-regression tests, then
   `tsc --noEmit` + a production Vite build on `ubuntu-latest` (Node 22). The
   review tests exercise initial manifest order, export preview request
-  construction, movement and boundary behavior, remove/restore, and
-  source-summary immutability. The exact-pinned `axe-core`/`jsdom` audit checks
+  construction, export execution request construction, movement and boundary
+  behavior, remove/restore, and source-summary immutability. The exact-pinned
+  `axe-core`/`jsdom` audit checks
   the real initial `index.html` and a representative populated import, review,
-  and export-preview DOM against applicable WCAG 2.0/2.1 A/AA rules. A canary
+  export-preview, and export-execution DOM against applicable WCAG 2.0/2.1 A/AA
+  rules. A canary
   proves an unlabeled button fails with rule and selector evidence.
 
 - `backend` job: apt-install of the Tauri Linux prerequisites, then
   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
   and `cargo test --locked` against the shell crate (which compiles
-  `foldscan-domain` via path and exercises the 10 shell unit tests).
+  `foldscan-domain` via path and exercises the 14 shell unit tests).
 
 ## Verified / not verified (honesty box)
 
@@ -111,10 +124,18 @@ request construction, and headless semantic accessibility regressions. Rust
 fixture tests prove that the preview re-imports source metadata, rejects stale,
 duplicate, empty, and unknown selections, preserves reviewed order, and returns
 the domain planner's canonical files and manifest digest without creating a
-destination. They are not export execution, GUI, assistive-technology, mounted
-media, or device tests. `color-contrast` is deliberately excluded from the
-jsdom axe run because jsdom has no rendered pixels; contrast requires a real
-browser/desktop acceptance pass rather than a false static pass.
+destination. Execution fixture tests additionally prove the shell actually runs
+the domain executor: the exported tree matches the canonical layout byte-for-
+byte with the reviewed page order, the manifest digest equals the preview
+digest for the same selection, finalized `export.json` bytes hash to the
+reported `manifest_sha256`, no `.foldscan-part` staging leftovers survive, an
+identical re-export onto the same parent is refused without disturbing the
+first export, every refusal path (empty destination, empty/unknown selection)
+returns a structured error before any directory is created, and source capture
+bytes are unchanged afterwards. They are not GUI, assistive-technology,
+mounted media, or device tests. `color-contrast` is deliberately excluded from
+the jsdom axe run because jsdom has no rendered pixels; contrast requires a
+real browser/desktop acceptance pass rather than a false static pass.
 
 Not verified — explicitly out of scope for this scaffold:
 
@@ -129,13 +150,16 @@ Not verified — explicitly out of scope for this scaffold:
   Linux lane exists.
 - The native folder picker was not opened in the headless test environment;
   mounted-volume, picker cancellation, and focus-return behavior need GUI
-  acceptance testing on supported desktops.
-- The review-plan and export-preview buttons were not exercised in a launched
-  GUI; keyboard-only, screen-reader, and focus-restore behavior of the rendered
-  list and preview status need desktop acceptance testing.
-- No destination was selected and no export was executed. The preview proves
-  planning only; filesystem materialization, cancellation, rollback, and output
-  inspection remain separate integration/GUI work.
+  acceptance testing on supported desktops. This applies to the new export
+  destination picker as well — the executed export path is proven only by
+  headless fixture tests, not by a launched GUI journey.
+- The review-plan, export-preview, and export buttons were not exercised in a
+  launched GUI; keyboard-only, screen-reader, and focus-restore behavior of
+  the rendered list and status regions need desktop acceptance testing.
+- Export execution is limited to headless fixture evidence: one session,
+  original-only exports, host filesystem only (real removable media not
+  mounted), no cooperative cancellation or progress events yet (the domain
+  `execute_export_cancellable` seam exists but the shell does not wire it).
 - Automated accessibility evidence is limited to axe-detectable semantic
   structure in the initial and representative populated states. Native picker
   focus return, keyboard journeys in a launched WebView, screen-reader output,
