@@ -25,6 +25,13 @@ export interface ExportPreviewRequest {
   captureIds: string[];
 }
 
+export interface ExportExecutionRequest {
+  volumePath: string;
+  destinationPath: string;
+  sessionId: string;
+  captureIds: string[];
+}
+
 export interface ImportSummaryCapture {
   capture_id: string;
   bytes: number;
@@ -58,15 +65,27 @@ export function createReviewPlan(summary: ImportSummarySource): ReviewPlan {
   };
 }
 
-export function createExportPreviewRequest(
-  volumePath: string,
-  session: ReviewSession,
-): ExportPreviewRequest {
+function reviewedSelection(volumePath: string, session: ReviewSession) {
   return {
     volumePath,
     sessionId: session.sessionId,
     captureIds: session.active.map((capture) => capture.captureId),
   };
+}
+
+export function createExportPreviewRequest(
+  volumePath: string,
+  session: ReviewSession,
+): ExportPreviewRequest {
+  return reviewedSelection(volumePath, session);
+}
+
+export function createExportExecutionRequest(
+  volumePath: string,
+  destinationPath: string,
+  session: ReviewSession,
+): ExportExecutionRequest {
+  return { destinationPath, ...reviewedSelection(volumePath, session) };
 }
 
 function updateSession(

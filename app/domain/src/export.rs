@@ -1158,6 +1158,7 @@ mod tests {
             captures: vec![crate::import::ImportedCapture {
                 capture_id: "c1".to_string(),
                 relative_path: "captures/c1.jpg".to_string(),
+                host_path: std::path::PathBuf::from("/fixture/sessions/s1/captures/c1.jpg"),
                 bytes: 10,
                 sha256: sha256_hex(b"0123456789"),
             }],

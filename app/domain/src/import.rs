@@ -33,6 +33,11 @@ pub struct ImportedCapture {
     pub capture_id: String,
     /// Path relative to the session directory (never absolute).
     pub relative_path: String,
+    /// Absolute host path of the file that was size- and checksum-verified
+    /// during import. Exporters must re-read originals from this verified
+    /// location (never from a re-encoded buffer); the importer guarantees a
+    /// match against `sha256`/`bytes` before returning it.
+    pub host_path: std::path::PathBuf,
     pub bytes: u64,
     pub sha256: String,
 }
@@ -270,6 +275,9 @@ pub fn import_session(
         verified.push(ImportedCapture {
             capture_id: entry.capture_id.clone(),
             relative_path: entry.relative_path.clone(),
+            // The exact path that passed the size + checksum gates above;
+            // hosts (e.g. the export executor) re-read originals from here.
+            host_path: file_path,
             bytes: entry.bytes,
             sha256: entry.sha256.clone(),
         });

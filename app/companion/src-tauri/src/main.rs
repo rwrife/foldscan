@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! FoldScan companion desktop shell (issues #39, #41, #43, and #47).
+//! FoldScan companion desktop shell (issues #39, #41, #43, #47, and #49).
 //!
 //! Scope: a buildable, linted, tested Tauri 2 shell that depends on the
 //! `foldscan-domain` crate by path and exposes:
@@ -13,14 +13,19 @@
 //!   capture selection against a *fresh* bounded import and returns the
 //!   canonical export layout (planned files + manifest digest) without
 //!   writing anything to disk.
+//! - [`execute_export_plan`]: runs the durable filesystem executor for one
+//!   reviewed session, copying originals from the verified import into a
+//!   user-chosen destination parent directory (manifest last, rollback on
+//!   failure, never overwriting an existing export root).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use foldscan_domain::executor::{execute_export, ExportSource};
 use foldscan_domain::export::{
     export_sessions_from_import, plan_export, ContentKind, ExportManifest,
 };
-use foldscan_domain::import::{import_volume, ImportPlan, ImportedSession};
+use foldscan_domain::import::{import_volume, ImportPlan, ImportedCapture, ImportedSession};
 use foldscan_domain::{Category, DomainError};
 use serde::Serialize;
 
@@ -32,6 +37,13 @@ pub const IMPORT_SUMMARY_SCHEMA: &str = "foldscan.companion.import_summary/0.1";
 
 /// Schema tag for the read-only export preview returned on success.
 pub const EXPORT_PREVIEW_SCHEMA: &str = "foldscan.companion.export_preview/0.1";
+
+/// Schema tag for the executed-export summary returned on success.
+pub const EXPORT_EXECUTION_SCHEMA: &str = "foldscan.companion.export_execution/0.1";
+
+/// Number of leading hex chars of the manifest digest used to make a
+/// deterministic, collision-resistant export directory name.
+const EXPORT_DIR_DIGEST_PREFIX: usize = 12;
 
 /// Versioned status document the UI renders as text. Keeping it structured
 /// (never a free-text blob) means the UI layer can label each field for
@@ -116,6 +128,43 @@ pub struct ExportPreview {
 pub enum ExportPreviewResult {
     Ok { preview: ExportPreview },
     Err { error: ImportFailure },
+}
+
+/// Summary of one executed export, returned on success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportExecutionSummary {
+    pub schema: String,
+    pub session_id: String,
+    /// Capture ids exactly as exported (reviewed order).
+    pub capture_ids: Vec<String>,
+    /// Absolute path of the export root the executor created.
+    pub root: String,
+    /// Planned files finalized by the executor, including the manifest.
+    pub files_written: usize,
+    /// Lowercase-hex SHA-256 of the finalized `export.json` bytes.
+    pub manifest_sha256: String,
+    /// [`ExportManifest::digest`] of the finalized manifest document.
+    pub manifest_digest: String,
+}
+
+/// Tagged result document for [`execute_export_plan`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ExportExecutionResult {
+    Ok { execution: ExportExecutionSummary },
+    Err { error: ImportFailure },
+}
+
+fn content_kind_tag(kind: ContentKind) -> &'static str {
+    match kind {
+        ContentKind::Original => "original",
+        ContentKind::Derivative => "derivative",
+        ContentKind::Document => "document",
+        ContentKind::Ocr => "ocr",
+        ContentKind::OcrText => "ocr_text",
+        ContentKind::Recipe => "recipe",
+        ContentKind::Manifest => "manifest",
+    }
 }
 
 /// Build the status document from compile-time crate metadata and the domain
@@ -224,11 +273,15 @@ fn select_session<'a>(
         })
 }
 
-fn build_export_preview(
+/// Validate an ordered capture selection against one imported session and
+/// return the selected captures in requested order. Shared by the read-only
+/// preview and the real executor bridge so both enforce identical review
+/// rules (non-empty, no duplicates, every id present in the import).
+fn select_captures(
     imported: &ImportPlan,
     session_id: &str,
     capture_ids: &[String],
-) -> Result<ExportPreview, DomainError> {
+) -> Result<Vec<ImportedCapture>, DomainError> {
     if session_id.trim().is_empty() {
         return Err(invalid_request("session_id is empty"));
     }
@@ -239,12 +292,11 @@ fn build_export_preview(
     }
 
     let session = select_session(&imported.sessions, session_id)?;
-    let capture_index: std::collections::HashMap<&str, &foldscan_domain::import::ImportedCapture> =
-        session
-            .captures
-            .iter()
-            .map(|capture| (capture.capture_id.as_str(), capture))
-            .collect();
+    let capture_index: HashMap<&str, &ImportedCapture> = session
+        .captures
+        .iter()
+        .map(|capture| (capture.capture_id.as_str(), capture))
+        .collect();
 
     let mut seen = HashSet::new();
     let mut selected = Vec::with_capacity(capture_ids.len());
@@ -263,10 +315,18 @@ fn build_export_preview(
         })?;
         selected.push((*capture).clone());
     }
+    Ok(selected)
+}
 
+/// Rebuild the canonical original-only export session from selected captures
+/// and plan/manifest it. Deterministic and shared by preview and execution.
+fn canonical_original_plan(
+    session_id: &str,
+    selected: &[ImportedCapture],
+) -> Result<(foldscan_domain::export::ExportPlan, ExportManifest), DomainError> {
     let mut export_sessions = export_sessions_from_import(&[ImportedSession {
-        session_id: session.session_id.clone(),
-        captures: selected,
+        session_id: session_id.to_string(),
+        captures: selected.to_vec(),
     }]);
     let session = export_sessions
         .first_mut()
@@ -277,21 +337,22 @@ fn build_export_preview(
 
     let plan = plan_export(&export_sessions, &[])?;
     let manifest = ExportManifest::from_plan(&plan, session_id)?;
+    Ok((plan, manifest))
+}
+
+fn build_export_preview(
+    imported: &ImportPlan,
+    session_id: &str,
+    capture_ids: &[String],
+) -> Result<ExportPreview, DomainError> {
+    let selected = select_captures(imported, session_id, capture_ids)?;
+    let (plan, manifest) = canonical_original_plan(session_id, &selected)?;
 
     let files = plan
         .files
         .iter()
         .map(|file| {
-            let content_kind = match file.content_kind {
-                ContentKind::Original => "original",
-                ContentKind::Derivative => "derivative",
-                ContentKind::Document => "document",
-                ContentKind::Ocr => "ocr",
-                ContentKind::OcrText => "ocr_text",
-                ContentKind::Recipe => "recipe",
-                ContentKind::Manifest => "manifest",
-            }
-            .to_string();
+            let content_kind = content_kind_tag(file.content_kind).to_string();
             ExportPreviewFile {
                 relative_path: file.relative_path.clone(),
                 capture_id: file.capture_id.clone(),
@@ -326,6 +387,103 @@ pub fn preview_export_plan_path(
     }
 }
 
+fn map_execution_error(err: DomainError) -> ExportExecutionResult {
+    ExportExecutionResult::Err {
+        error: ImportFailure {
+            category: category_tag(err.category).to_string(),
+            message: err.message,
+        },
+    }
+}
+
+fn run_export(
+    imported: &ImportPlan,
+    destination_parent: &Path,
+    session_id: &str,
+    capture_ids: &[String],
+) -> Result<ExportExecutionSummary, DomainError> {
+    if destination_parent.as_os_str().is_empty() {
+        return Err(invalid_request(
+            "destination parent directory is empty; choose a folder first",
+        ));
+    }
+
+    // Same review rules as the preview: the selection must be a non-empty,
+    // duplicate-free subset of a freshly re-verified import. The executor
+    // then re-reads originals from these verified host paths only.
+    let selected = select_captures(imported, session_id, capture_ids)?;
+    let (plan, manifest) = canonical_original_plan(session_id, &selected)?;
+    let digest = manifest.digest();
+
+    // Deterministic, collision-resistant destination: session id (already
+    // restricted by the planner to path-safe characters) plus the leading
+    // manifest-digest prefix, so re-running the identical reviewed export
+    // onto the same parent targets the same root and is refused rather
+    // than silently duplicating bytes.
+    let root = destination_parent.join(format!(
+        "foldscan-export-{}-{}",
+        session_id,
+        &digest[..EXPORT_DIR_DIGEST_PREFIX]
+    ));
+
+    let mut sources: HashMap<String, ExportSource> = HashMap::new();
+    for file in &plan.files {
+        if file.content_kind == ContentKind::Original {
+            let cid = file
+                .capture_id
+                .as_deref()
+                .ok_or_else(|| DomainError::internal("planned original file without capture_id"))?;
+            let capture = selected
+                .iter()
+                .find(|capture| capture.capture_id == cid)
+                .ok_or_else(|| {
+                    DomainError::internal("planned original references an unselected capture")
+                })?;
+            sources.insert(
+                file.relative_path.clone(),
+                ExportSource::file(capture.host_path.clone()),
+            );
+        }
+    }
+
+    let exec = execute_export(&plan, &root, &sources, &manifest)?;
+    Ok(ExportExecutionSummary {
+        schema: EXPORT_EXECUTION_SCHEMA.to_string(),
+        session_id: session_id.to_string(),
+        capture_ids: capture_ids.to_vec(),
+        root: exec.root.display().to_string(),
+        files_written: exec.files_written,
+        manifest_sha256: exec.manifest_sha256,
+        manifest_digest: digest,
+    })
+}
+
+/// Import, review-validate, and execute one original-only export into
+/// `destination_parent`. All refusal paths (bad volume, bad selection,
+/// existing destination root) return structured errors; a successful run
+/// returns the executor's summary of what was finalized.
+pub fn execute_export_plan_path(
+    volume_root: &Path,
+    destination_parent: &Path,
+    session_id: &str,
+    capture_ids: &[String],
+) -> ExportExecutionResult {
+    let imported = match import_volume(volume_root) {
+        Ok(plan) => plan,
+        Err(err) => return map_execution_error(err),
+    };
+
+    match run_export(
+        &imported,
+        destination_parent,
+        session_id.trim(),
+        capture_ids,
+    ) {
+        Ok(execution) => ExportExecutionResult::Ok { execution },
+        Err(err) => map_execution_error(err),
+    }
+}
+
 /// The command registered by the scaffold. It performs no I/O and
 /// takes no arguments, so the capability surface stays `core:default`.
 #[tauri::command]
@@ -353,13 +511,30 @@ fn preview_export_plan(
     )
 }
 
+/// Durable export execution command for one reviewed session.
+#[tauri::command]
+fn execute_export_plan(
+    volume_path: String,
+    destination_path: String,
+    session_id: String,
+    capture_ids: Vec<String>,
+) -> ExportExecutionResult {
+    execute_export_plan_path(
+        Path::new(volume_path.trim()),
+        Path::new(destination_path.trim()),
+        session_id.trim(),
+        &capture_ids,
+    )
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             companion_status,
             import_volume_summary,
-            preview_export_plan
+            preview_export_plan,
+            execute_export_plan
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -686,5 +861,242 @@ mod tests {
         let err_json = serde_json::to_value(err).unwrap();
         assert_eq!(err_json["status"], "err");
         assert_eq!(err_json["error"]["category"], "invalid_request");
+    }
+
+    #[test]
+    fn execute_export_plan_writes_originals_then_manifest() {
+        let tmp = TempDir::new().unwrap();
+        create_preview_fixture(tmp.path());
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        // The execution digest must equal the read-only preview digest for
+        // the same selection — one reviewed state, one canonical export.
+        let preview = preview_export_plan_path(
+            tmp.path(),
+            "sess-001",
+            &["cap-2".to_string(), "cap-1".to_string()],
+        );
+        let preview_digest = match preview {
+            ExportPreviewResult::Ok { preview } => preview.manifest_digest,
+            ExportPreviewResult::Err { error } => panic!("preview failed: {:?}", error),
+        };
+
+        let result = execute_export_plan_path(
+            tmp.path(),
+            &dest,
+            "sess-001",
+            &["cap-2".to_string(), "cap-1".to_string()],
+        );
+        let summary = match result {
+            ExportExecutionResult::Ok { execution } => execution,
+            ExportExecutionResult::Err { error } => panic!("export failed: {:?}", error),
+        };
+        assert_eq!(summary.schema, EXPORT_EXECUTION_SCHEMA);
+        assert_eq!(summary.session_id, "sess-001");
+        assert_eq!(summary.capture_ids, vec!["cap-2", "cap-1"]);
+        assert_eq!(summary.files_written, 3); // 2 originals + manifest
+        assert_eq!(summary.manifest_digest, preview_digest);
+        assert!(foldscan_domain::checksum::is_lowercase_hex_sha256(
+            &summary.manifest_sha256
+        ));
+
+        let root = Path::new(&summary.root);
+        assert!(root.starts_with(&dest));
+        let dir_name = root.file_name().unwrap().to_string_lossy().to_string();
+        assert!(dir_name.starts_with("foldscan-export-sess-001-"));
+        assert_eq!(dir_name.len(), "foldscan-export-sess-001-".len() + 12);
+
+        // Exact planned layout, originals byte-identical to the volume.
+        let cap2 = root.join("originals/sess-001/cap-2.jpg");
+        let cap1 = root.join("originals/sess-001/cap-1.jpg");
+        let manifest_file = root.join("export.json");
+        assert!(cap2.is_file() && cap1.is_file() && manifest_file.is_file());
+        let second = b"\xFF\xD8\xFF\xE0second-page-image\xFF\xD9";
+        assert_eq!(fs::read(&cap2).unwrap(), second);
+        assert_eq!(fs::read(&cap1).unwrap(), FAKE_JPEG);
+        let manifest_bytes = fs::read(&manifest_file).unwrap();
+        assert_eq!(
+            sha256_hex(&manifest_bytes),
+            summary.manifest_sha256,
+            "reported manifest hash must match finalized bytes"
+        );
+
+        // Manifest-last content check: the portable document lists pages in
+        // the reviewed order and no staging leftovers exist.
+        let doc: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(doc["schema"], "foldscan.export/0.1");
+        assert_eq!(doc["pages"][0]["capture_id"], "cap-2");
+        assert_eq!(doc["pages"][1]["capture_id"], "cap-1");
+        assert!(doc["pages"][0]["processed_sha256"].is_null());
+        let mut leftovers = Vec::new();
+        for entry in walkdir(root) {
+            if entry
+                .extension()
+                .map(|e| e == "foldscan-part")
+                .unwrap_or(false)
+            {
+                leftovers.push(entry);
+            }
+        }
+        assert!(
+            leftovers.is_empty(),
+            "finalized export has staged leftovers"
+        );
+
+        // The volume stays read-only through export.
+        assert_eq!(
+            fs::read(
+                tmp.path()
+                    .join("FOLDSCAN/sessions/sess-001/captures/cap-1.jpg")
+            )
+            .unwrap(),
+            FAKE_JPEG
+        );
+    }
+
+    fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn execute_export_plan_refuses_to_overwrite_a_prior_export() {
+        let tmp = TempDir::new().unwrap();
+        create_preview_fixture(tmp.path());
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        let first = execute_export_plan_path(
+            tmp.path(),
+            &dest,
+            "sess-001",
+            &["cap-1".to_string(), "cap-2".to_string()],
+        );
+        let root = match first {
+            ExportExecutionResult::Ok { execution } => Path::new(&execution.root).to_path_buf(),
+            ExportExecutionResult::Err { error } => panic!("first export failed: {:?}", error),
+        };
+        assert!(root.is_dir());
+
+        // Re-running the identical reviewed export resolves to the same
+        // deterministic root and must be refused, not merged or replaced.
+        let second = execute_export_plan_path(
+            tmp.path(),
+            &dest,
+            "sess-001",
+            &["cap-1".to_string(), "cap-2".to_string()],
+        );
+        match second {
+            ExportExecutionResult::Ok { .. } => panic!("re-export must be refused"),
+            ExportExecutionResult::Err { error } => {
+                assert_eq!(error.category, "invalid_request");
+                assert!(error.message.contains("already exists"));
+            }
+        }
+        // The refused run left the first export untouched.
+        assert!(root.join("export.json").is_file());
+    }
+
+    #[test]
+    fn execute_export_plan_rejects_bad_requests_before_touching_disk() {
+        let tmp = TempDir::new().unwrap();
+        create_preview_fixture(tmp.path());
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+
+        let empty_dest = execute_export_plan_path(
+            tmp.path(),
+            Path::new(""),
+            "sess-001",
+            &["cap-1".to_string()],
+        );
+        match empty_dest {
+            ExportExecutionResult::Ok { .. } => panic!("empty destination must fail"),
+            ExportExecutionResult::Err { error } => {
+                assert_eq!(error.category, "invalid_request");
+                assert!(error.message.contains("destination parent"));
+            }
+        }
+
+        let empty_sel = execute_export_plan_path(tmp.path(), &dest, "sess-001", &[]);
+        match empty_sel {
+            ExportExecutionResult::Ok { .. } => panic!("empty selection must fail"),
+            ExportExecutionResult::Err { error } => {
+                assert_eq!(error.category, "invalid_request");
+                assert!(error.message.contains("at least one capture"));
+            }
+        }
+
+        let unknown =
+            execute_export_plan_path(tmp.path(), &dest, "sess-001", &["cap-missing".to_string()]);
+        match unknown {
+            ExportExecutionResult::Ok { .. } => panic!("unknown capture must fail"),
+            ExportExecutionResult::Err { error } => {
+                assert_eq!(error.category, "invalid_request");
+                assert!(error.message.contains("is not present"));
+            }
+        }
+
+        // None of the refusals created an export directory.
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn execution_result_serializes_tagged_json() {
+        let ok = ExportExecutionResult::Ok {
+            execution: ExportExecutionSummary {
+                schema: EXPORT_EXECUTION_SCHEMA.to_string(),
+                session_id: "sess-001".to_string(),
+                capture_ids: vec!["cap-1".to_string()],
+                root: "/tmp/foldscan-export-sess-001-abc".to_string(),
+                files_written: 2,
+                manifest_sha256: "b".repeat(64),
+                manifest_digest: "a".repeat(64),
+            },
+        };
+        let ok_json = serde_json::to_value(ok).unwrap();
+        assert_eq!(ok_json["status"], "ok");
+        assert_eq!(ok_json["execution"]["schema"], EXPORT_EXECUTION_SCHEMA);
+        let mut keys: Vec<&str> = ok_json["execution"]
+            .as_object()
+            .expect("execution is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "capture_ids",
+                "files_written",
+                "manifest_digest",
+                "manifest_sha256",
+                "root",
+                "schema",
+                "session_id"
+            ]
+        );
+
+        let err = ExportExecutionResult::Err {
+            error: ImportFailure {
+                category: "storage_unavailable".to_string(),
+                message: "volume gone".to_string(),
+            },
+        };
+        let err_json = serde_json::to_value(err).unwrap();
+        assert_eq!(err_json["status"], "err");
+        assert_eq!(err_json["error"]["category"], "storage_unavailable");
     }
 }

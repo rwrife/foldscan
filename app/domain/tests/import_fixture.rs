@@ -56,6 +56,33 @@ fn valid_volume_imports_with_verified_checksums() {
 }
 
 #[test]
+fn host_path_points_at_the_verified_capture_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let sha = build_valid_volume(tmp.path());
+    let plan = import_volume(tmp.path()).expect("valid volume must import");
+    let cap = &plan.sessions[0].captures[0];
+    // host_path is the exact file the importer size- and checksum-verified:
+    // it exists, is a regular file, and re-hashing its bytes reproduces the
+    // declared checksum. Exporters rely on this to re-read originals from
+    // the verified import instead of a re-encoded buffer.
+    assert!(cap.host_path.is_absolute());
+    assert!(cap.host_path.is_file());
+    let on_disk = fs::read(&cap.host_path).expect("host path must be readable");
+    assert_eq!(on_disk.len() as u64, cap.bytes);
+    assert_eq!(sha256_hex(&on_disk), cap.sha256);
+    assert_eq!(cap.sha256, sha);
+    assert_eq!(
+        cap.host_path,
+        tmp.path()
+            .join("FOLDSCAN")
+            .join("sessions")
+            .join("sess-001")
+            .join("captures")
+            .join("cap-1.jpg")
+    );
+}
+
+#[test]
 fn foldscan_dir_can_be_the_root_itself() {
     let tmp = TempDir::new().unwrap();
     build_valid_volume(tmp.path());
