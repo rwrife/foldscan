@@ -271,8 +271,10 @@ fn validate_ocr_bindings(
 }
 
 /// Build export sessions (and the recipe documents they reference) from a
-/// validated import. Every imported capture becomes an original-backed page;
-/// no processing has happened yet, so no derivatives exist.
+/// validated import. Every imported capture becomes an original-backed page
+/// carrying the capture's validated declared `media_type` (so the planner's
+/// original extension always matches the content type — no hard-coded
+/// guess); no processing has happened yet, so no derivatives exist.
 pub fn export_sessions_from_import(sessions: &[ImportedSession]) -> Vec<ExportSession> {
     sessions
         .iter()
@@ -283,7 +285,7 @@ pub fn export_sessions_from_import(sessions: &[ImportedSession]) -> Vec<ExportSe
                 .iter()
                 .map(|c| ExportPage {
                     capture_id: c.capture_id.clone(),
-                    media_type: "image/jpeg".to_string(),
+                    media_type: c.media_type.clone(),
                     processed_media_type: None,
                     original_sha256: c.sha256.clone(),
                     original_bytes: c.bytes,
@@ -1158,6 +1160,7 @@ mod tests {
             captures: vec![crate::import::ImportedCapture {
                 capture_id: "c1".to_string(),
                 relative_path: "captures/c1.jpg".to_string(),
+                media_type: "image/jpeg".to_string(),
                 host_path: std::path::PathBuf::from("/fixture/sessions/s1/captures/c1.jpg"),
                 bytes: 10,
                 sha256: sha256_hex(b"0123456789"),
@@ -1169,5 +1172,44 @@ mod tests {
             sha256_hex(b"0123456789")
         );
         assert!(sessions[0].pages[0].processed_sha256.is_none());
+    }
+
+    #[test]
+    fn from_import_carries_declared_media_type_into_layout() {
+        let imported = vec![crate::import::ImportedSession {
+            session_id: "s1".to_string(),
+            captures: vec![
+                crate::import::ImportedCapture {
+                    capture_id: "c-jpg".to_string(),
+                    relative_path: "captures/c-jpg.jpg".to_string(),
+                    media_type: "image/jpeg".to_string(),
+                    host_path: std::path::PathBuf::from("/fixture/sessions/s1/captures/c-jpg.jpg"),
+                    bytes: 10,
+                    sha256: sha256_hex(b"0123456789"),
+                },
+                crate::import::ImportedCapture {
+                    capture_id: "c-png".to_string(),
+                    relative_path: "captures/c-png.png".to_string(),
+                    media_type: "image/png".to_string(),
+                    host_path: std::path::PathBuf::from("/fixture/sessions/s1/captures/c-png.png"),
+                    bytes: 10,
+                    sha256: sha256_hex(b"0123456789"),
+                },
+            ],
+        }];
+        let sessions = export_sessions_from_import(&imported);
+        assert_eq!(sessions[0].pages[0].media_type, "image/jpeg");
+        assert_eq!(sessions[0].pages[1].media_type, "image/png");
+
+        let plan = plan_export(&sessions, &[]).expect("mixed-type session plans");
+        let paths: Vec<&str> = plan
+            .files
+            .iter()
+            .filter(|f| f.content_kind == ContentKind::Original)
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        // The planner's extension follows the declared media type, so a PNG
+        // original can never be exported under a .jpg name again.
+        assert_eq!(paths, ["originals/s1/c-jpg.jpg", "originals/s1/c-png.png"]);
     }
 }

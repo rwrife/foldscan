@@ -196,7 +196,18 @@ Implemented so far (issue #5, domain work in `app/domain`):
     engine exists; geometric line re-flow remains out of scope. See
     [OCR text export evidence](domain/evidence/ocr-text-export.md).
 
-The crate is verified by 220 unit/fixture tests plus a clean
+14. Capture media type preservation: a capture's declared `media_type` is
+    validated against a closed capture vocabulary (`image/jpeg`,
+    `image/png`) during manifest validation, before any capture file is
+    opened; an unknown declaration is an `InvalidRequest` naming the
+    capture, and an omitted field resolves to the documented
+    `image/jpeg` default. The resolved type rides on `ImportedCapture`
+    into `export_sessions_from_import`, so a planned original's extension
+    always matches the declared content type (PNG captures export as
+    `.png`, not mislabeled `.jpg`), and the manifest digest covers the
+    declaration. See [media type evidence](domain/evidence/capture-media-type.md).
+
+The crate is verified by 228 unit/fixture tests plus a clean
 `clippy -D warnings` pass locally; CI runs the same gates
 (`.github/workflows/app-domain.yml`). All
 evidence is software fixture evidence; no physical
