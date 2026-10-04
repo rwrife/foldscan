@@ -13,6 +13,34 @@ use crate::error::DomainError;
 use crate::limits::*;
 use crate::version::{parse_session_schema, ProtocolVersion};
 
+/// Closed vocabulary of capture media types a device may declare.
+///
+/// Device input is untrusted: any value outside this list fails manifest
+/// validation *before* a capture file is opened, so an unknown or hostile
+/// media type is rejected at parse time (protocol: bounded validation
+/// before IO) instead of surfacing later — or worse, mislabeling exported
+/// originals with the wrong extension (see [`crate::export::plan_export`]).
+pub const SUPPORTED_CAPTURE_MEDIA_TYPES: [&str; 2] = ["image/jpeg", "image/png"];
+
+/// Media type assumed when a capture manifest omits `media_type`.
+///
+/// JPEG is the protocol's baseline capture format
+/// (`docs/protocol.md` storage layout); older/leaner manifests may omit the
+/// field, and import treats the absence as exactly this value.
+pub const DEFAULT_CAPTURE_MEDIA_TYPE: &str = "image/jpeg";
+
+/// Validate a declared capture media type against the closed vocabulary.
+pub fn validate_capture_media_type(capture_id: &str, media_type: &str) -> Result<(), DomainError> {
+    if SUPPORTED_CAPTURE_MEDIA_TYPES.contains(&media_type) {
+        Ok(())
+    } else {
+        Err(DomainError::invalid_request(format!(
+            "capture {} declares unsupported media type {}",
+            capture_id, media_type
+        )))
+    }
+}
+
 fn default_null_time() -> Option<String> {
     None
 }
@@ -117,6 +145,14 @@ impl SessionManifest {
                     entry.capture_id
                 )));
             }
+            // Untrusted declared media type: validated against the closed
+            // capture vocabulary before any capture file is opened. An
+            // omitted field is the documented JPEG default, not a hole.
+            let media_type = entry
+                .media_type
+                .as_deref()
+                .unwrap_or(DEFAULT_CAPTURE_MEDIA_TYPE);
+            validate_capture_media_type(&entry.capture_id, media_type)?;
             if !is_lowercase_hex_sha256(&entry.sha256) {
                 return Err(DomainError::invalid_request(format!(
                     "capture {} has a malformed sha256 field",

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::checksum::sha256_hex;
 use crate::error::{Category, DomainError};
 use crate::limits::*;
-use crate::manifest::{DeviceManifest, SessionManifest};
+use crate::manifest::{DeviceManifest, SessionManifest, DEFAULT_CAPTURE_MEDIA_TYPE};
 use crate::paths::safe_join;
 
 /// Root directory name expected on the removable volume.
@@ -33,6 +33,13 @@ pub struct ImportedCapture {
     pub capture_id: String,
     /// Path relative to the session directory (never absolute).
     pub relative_path: String,
+    /// Declared capture media type, validated against the closed vocabulary
+    /// at manifest-parse time ([`crate::manifest::validate_capture_media_type`]).
+    /// An omitted manifest field resolves to
+    /// [`DEFAULT_CAPTURE_MEDIA_TYPE`]. Export-session synthesis reuses this
+    /// value verbatim so an exported original's extension always matches
+    /// the content type the device declared — never a hard-coded guess.
+    pub media_type: String,
     /// Absolute host path of the file that was size- and checksum-verified
     /// during import. Exporters must re-read originals from this verified
     /// location (never from a re-encoded buffer); the importer guarantees a
@@ -275,6 +282,12 @@ pub fn import_session(
         verified.push(ImportedCapture {
             capture_id: entry.capture_id.clone(),
             relative_path: entry.relative_path.clone(),
+            // Same resolution rule that `SessionManifest::validate`
+            // checked: declared value or the documented JPEG default.
+            media_type: entry
+                .media_type
+                .clone()
+                .unwrap_or_else(|| DEFAULT_CAPTURE_MEDIA_TYPE.to_string()),
             // The exact path that passed the size + checksum gates above;
             // hosts (e.g. the export executor) re-read originals from here.
             host_path: file_path,
