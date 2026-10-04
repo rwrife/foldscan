@@ -60,6 +60,7 @@ pub mod import;
 pub mod limits;
 pub mod manifest;
 pub mod ocr;
+pub mod ocr_reimport;
 pub mod paths;
 pub mod pdf;
 pub mod png;
@@ -81,6 +82,7 @@ pub use ocr::{
     CONFIDENCE_PER_MILLE_MAX, MAX_LANGUAGE_ID_LEN, MAX_OCR_BLOCKS, MAX_OCR_DOCUMENT_BYTES,
     MAX_OCR_LANGUAGES, MAX_OCR_TEXT_BYTES, MAX_OCR_TEXT_CHARS, OCR_SCHEMA_PREFIX,
 };
+pub use ocr_reimport::load_exported_ocr;
 pub use pdf::export_pdf;
 pub use processing::{
     apply_recipe, auto_balance, estimate_illumination, flatten_illumination, perspective,
