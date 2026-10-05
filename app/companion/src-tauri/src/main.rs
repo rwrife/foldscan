@@ -26,7 +26,8 @@ use foldscan_domain::export::{
     export_sessions_from_import, plan_export, ContentKind, ExportManifest,
 };
 use foldscan_domain::import::{import_volume, ImportPlan, ImportedCapture, ImportedSession};
-use foldscan_domain::{Category, DomainError};
+use foldscan_domain::ocr::{OcrBlock, OcrResult, OcrStatus};
+use foldscan_domain::{load_exported_ocr, Category, DomainError};
 use serde::Serialize;
 
 /// Schema tag for the status document returned by [`companion_status`].
@@ -40,6 +41,10 @@ pub const EXPORT_PREVIEW_SCHEMA: &str = "foldscan.companion.export_preview/0.1";
 
 /// Schema tag for the executed-export summary returned on success.
 pub const EXPORT_EXECUTION_SCHEMA: &str = "foldscan.companion.export_execution/0.1";
+pub const OCR_REVIEW_SCHEMA: &str = "foldscan.companion.ocr_review/0.1";
+const MAX_REVIEW_DOCUMENTS: usize = 32;
+const MAX_REVIEW_BLOCKS_PER_DOCUMENT: usize = 256;
+const MAX_REVIEW_TEXT_BYTES: usize = 128 * 1024;
 
 /// Number of leading hex chars of the manifest digest used to make a
 /// deterministic, collision-resistant export directory name.
@@ -153,6 +158,97 @@ pub struct ExportExecutionSummary {
 pub enum ExportExecutionResult {
     Ok { execution: ExportExecutionSummary },
     Err { error: ImportFailure },
+}
+
+/// Bounded UI projection without host paths or unreviewed content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OcrReviewDocument {
+    pub capture_id: String,
+    pub requested_languages: Vec<String>,
+    pub frame_width: u32,
+    pub frame_height: u32,
+    pub blocks: Vec<OcrBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OcrReview {
+    pub schema: String,
+    pub documents: Vec<OcrReviewDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OcrReviewResult {
+    Ok { review: OcrReview },
+    Err { error: ImportFailure },
+}
+
+/// Caller supplies the reviewed digest from outside the export directory.
+/// Refuse oversized display data rather than silently truncating it.
+pub fn review_exported_ocr_path(root: &Path, reviewed_digest: &str) -> OcrReviewResult {
+    let docs = match load_exported_ocr(root, reviewed_digest) {
+        Ok(docs) => docs,
+        Err(err) => {
+            return OcrReviewResult::Err {
+                error: ImportFailure {
+                    category: category_tag(err.category).to_string(),
+                    message: err.message,
+                },
+            }
+        }
+    };
+    project_ocr_review(docs)
+}
+
+fn project_ocr_review(docs: Vec<OcrResult>) -> OcrReviewResult {
+    if docs.len() > MAX_REVIEW_DOCUMENTS {
+        return ocr_review_limit_error();
+    }
+    let mut total_text_bytes = 0usize;
+    let mut projected = Vec::with_capacity(docs.len());
+    for doc in docs {
+        let OcrStatus::Completed {
+            frame_width,
+            frame_height,
+            blocks,
+        } = doc.status
+        else {
+            return OcrReviewResult::Err {
+                error: ImportFailure {
+                    category: "internal_error".into(),
+                    message: "non-completed OCR document returned by loader".into(),
+                },
+            };
+        };
+        total_text_bytes = total_text_bytes
+            .saturating_add(blocks.iter().map(|block| block.text.len()).sum::<usize>());
+        if blocks.len() > MAX_REVIEW_BLOCKS_PER_DOCUMENT || total_text_bytes > MAX_REVIEW_TEXT_BYTES
+        {
+            return ocr_review_limit_error();
+        }
+        projected.push(OcrReviewDocument {
+            capture_id: doc.capture_id,
+            requested_languages: doc.requested_languages,
+            frame_width,
+            frame_height,
+            blocks,
+        });
+    }
+    OcrReviewResult::Ok {
+        review: OcrReview {
+            schema: OCR_REVIEW_SCHEMA.into(),
+            documents: projected,
+        },
+    }
+}
+
+fn ocr_review_limit_error() -> OcrReviewResult {
+    OcrReviewResult::Err {
+        error: ImportFailure {
+            category: "invalid_request".into(),
+            message: "OCR review exceeds companion display limits (32 documents, 256 blocks per document, 128 KiB total text)".into(),
+        },
+    }
 }
 
 fn content_kind_tag(kind: ContentKind) -> &'static str {
@@ -527,6 +623,12 @@ fn execute_export_plan(
     )
 }
 
+/// Digest-bound, read-only inspection of exported OCR documents.
+#[tauri::command]
+fn review_exported_ocr(export_path: String, reviewed_digest: String) -> OcrReviewResult {
+    review_exported_ocr_path(Path::new(export_path.trim()), reviewed_digest.trim())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -534,7 +636,8 @@ fn main() {
             companion_status,
             import_volume_summary,
             preview_export_plan,
-            execute_export_plan
+            execute_export_plan,
+            review_exported_ocr
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1098,5 +1201,131 @@ mod tests {
         let err_json = serde_json::to_value(err).unwrap();
         assert_eq!(err_json["status"], "err");
         assert_eq!(err_json["error"]["category"], "storage_unavailable");
+    }
+
+    #[test]
+    fn ocr_review_loads_real_export_and_refuses_tampering_and_wrong_digest() {
+        use foldscan_domain::ocr::{OcrResult, OcrStatus};
+        use foldscan_domain::{plan_export, ExportPage, ExportSession};
+
+        let tmp = TempDir::new().unwrap();
+        let original = b"synthetic original";
+        let doc = OcrResult {
+            schema: "foldscan.ocr/0.1".into(),
+            capture_id: "cap-1".into(),
+            requested_languages: vec!["eng".into()],
+            status: OcrStatus::Completed {
+                frame_width: 40,
+                frame_height: 40,
+                blocks: vec![OcrBlock {
+                    text: "private fixture".into(),
+                    confidence: 753,
+                    x: 2,
+                    y: 3,
+                    width: 20,
+                    height: 10,
+                }],
+            },
+        };
+        let session = ExportSession {
+            session_id: "sess-001".into(),
+            pages: vec![ExportPage {
+                capture_id: "cap-1".into(),
+                media_type: "image/jpeg".into(),
+                processed_media_type: None,
+                original_sha256: sha256_hex(original),
+                original_bytes: original.len() as u64,
+                processed_sha256: None,
+                processed_bytes: None,
+                recipe_digest: None,
+            }],
+            document: None,
+            ocr: vec![doc],
+            ocr_text: true,
+        };
+        let plan = plan_export(&[session], &[]).unwrap();
+        let manifest = ExportManifest::from_plan(&plan, "sess-001").unwrap();
+        let digest = manifest.digest();
+        let source = tmp.path().join("source.jpg");
+        fs::write(&source, original).unwrap();
+        let sources = HashMap::from([(
+            "originals/sess-001/cap-1.jpg".to_string(),
+            ExportSource::file(source),
+        )]);
+        let root = tmp.path().join("out");
+        execute_export(&plan, &root, &sources, &manifest).unwrap();
+        let ok = review_exported_ocr_path(&root, &digest);
+        let OcrReviewResult::Ok { review } = ok else {
+            panic!("expected OCR review");
+        };
+        assert_eq!(review.schema, OCR_REVIEW_SCHEMA);
+        assert_eq!(review.documents.len(), 1);
+        assert_eq!(review.documents[0].capture_id, "cap-1");
+        assert_eq!(review.documents[0].blocks[0].confidence, 753);
+        assert_eq!(review.documents[0].blocks[0].text, "private fixture");
+        let bad = review_exported_ocr_path(&root, &"0".repeat(64));
+        let OcrReviewResult::Err { error } = bad else {
+            panic!("wrong digest accepted");
+        };
+        assert_eq!(error.category, "checksum_mismatch");
+        assert!(!error.message.contains("private"));
+        fs::write(root.join("ocr/sess-001/cap-1.json"), b"tampered").unwrap();
+        let bad = review_exported_ocr_path(&root, &digest);
+        let OcrReviewResult::Err { error } = bad else {
+            panic!("tampering accepted");
+        };
+        assert_eq!(error.category, "invalid_request");
+        assert!(!error.message.contains("private"));
+        let bad = review_exported_ocr_path(&tmp.path().join("missing"), &digest);
+        assert!(matches!(bad, OcrReviewResult::Err { .. }));
+    }
+
+    #[test]
+    fn ocr_projection_refuses_oversized_text_without_partial_results() {
+        let tmp = TempDir::new().unwrap();
+        let result = review_exported_ocr_path(tmp.path(), "not-a-digest");
+        let OcrReviewResult::Err { error } = result else {
+            panic!("invalid digest accepted");
+        };
+        assert_eq!(error.category, "invalid_request");
+        assert!(!error.message.contains(tmp.path().to_str().unwrap()));
+        let doc = OcrResult {
+            schema: "foldscan.ocr/0.1".into(),
+            capture_id: "p1".into(),
+            requested_languages: vec!["eng".into()],
+            status: OcrStatus::Completed {
+                frame_width: 40,
+                frame_height: 40,
+                blocks: vec![OcrBlock {
+                    text: "x".repeat(MAX_REVIEW_TEXT_BYTES + 1),
+                    confidence: 700,
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }],
+            },
+        };
+        for docs in [
+            vec![doc.clone()],
+            vec![doc.clone(); MAX_REVIEW_DOCUMENTS + 1],
+        ] {
+            let json = serde_json::to_value(project_ocr_review(docs)).unwrap();
+            assert_eq!(json["status"], "err");
+            assert!(json.get("review").is_none());
+        }
+        let OcrStatus::Completed { blocks, .. } = &doc.status else {
+            unreachable!()
+        };
+        let mut many = doc.clone();
+        many.status = OcrStatus::Completed {
+            frame_width: 40,
+            frame_height: 40,
+            blocks: vec![blocks[0].clone(); MAX_REVIEW_BLOCKS_PER_DOCUMENT + 1],
+        };
+        assert!(matches!(
+            project_ocr_review(vec![many]),
+            OcrReviewResult::Err { .. }
+        ));
     }
 }

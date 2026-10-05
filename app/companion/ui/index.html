@@ -79,6 +79,22 @@
         </p>
         <div id="export-results" aria-live="polite"></div>
       </section>
+      <section aria-labelledby="ocr-heading">
+        <h2 id="ocr-heading">Review exported OCR</h2>
+        <p>Read-only local text review. Choose an existing export directory and enter its reviewed manifest digest from an independent receipt. The directory cannot authenticate itself. No images or PDFs are verified here.</p>
+        <form id="ocr-form">
+          <label for="ocr-export-path">Export directory</label>
+          <div class="input-row">
+            <input id="ocr-export-path" type="text" required autocomplete="off" />
+            <button id="ocr-choose-folder" type="button">Choose export folder</button>
+          </div>
+          <label for="ocr-digest">Reviewed manifest digest (64 lowercase hex characters)</label>
+          <input id="ocr-digest" type="text" required pattern="[0-9a-f]{64}" minlength="64" maxlength="64" autocomplete="off" spellcheck="false" />
+          <button type="submit">Review OCR text</button>
+        </form>
+        <p id="ocr-status" role="status" aria-live="polite">No export reviewed.</p>
+        <div id="ocr-results"></div>
+      </section>
     </main>
     <footer role="contentinfo">
       <p>Runs fully offline. No telemetry, no accounts.</p>

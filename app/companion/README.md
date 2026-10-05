@@ -32,6 +32,28 @@ bytes. Source originals are re-read from the importer's verified host paths and
 are never modified. The shell still contains
 **no image thumbnail decoding, image processing, or cancellation/progress UI**.
 
+## Read-only OCR export review (#55)
+
+An existing local export with OCR sidecars can be inspected separately from
+volume import. Choose the *export root* (the directory containing `export.json`)
+and paste the 64-character manifest digest from a previously saved, independently
+reviewed preview/execution receipt. The form never trusts a digest read from
+that same directory. The shell calls `load_exported_ocr`, validating the export
+manifest, OCR JSON bindings and any `.txt` rendition before displaying only
+completed documents in manifest order. Confidence is numeric per 1000 and
+bounding boxes are in pixels; text is inserted with `textContent`, never HTML.
+No OCR text is logged, persisted or sent over the network by this surface.
+Projection refuses more than 32 documents, 256 blocks in a document, or
+128 KiB of combined text rather than showing an incomplete review. A new
+attempt or edit clears prior text; out-of-order responses cannot repopulate it.
+The digest is an integrity pin, **not authentication**; use a stable local
+snapshot because filesystem mutation between validation and open is not
+protected against. This does not verify image/PDF bytes, run an OCR engine,
+allow editing, or import changes into the export. The original-only export
+command above does not generate OCR sidecars; this view is for exports with
+previously generated, bound OCR documents. No physical or GUI session tested.
+
+
 ## Layout
 
 ```
@@ -92,7 +114,7 @@ needs a desktop session; CI does not launch a GUI.
 ## What CI verifies (`.github/workflows/app-companion.yml`)
 
 - `ui` job: `npm ci` from the committed lockfile, seven deterministic
-  review-plan and request tests, three accessibility-regression tests, then
+  review-plan and request tests, one inert-OCR-renderer test, three accessibility-regression tests, then
   `tsc --noEmit` + a production Vite build on `ubuntu-latest` (Node 22). The
   review tests exercise initial manifest order, export preview request
   construction, export execution request construction, movement and boundary
@@ -106,7 +128,7 @@ needs a desktop session; CI does not launch a GUI.
 - `backend` job: apt-install of the Tauri Linux prerequisites, then
   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
   and `cargo test --locked` against the shell crate (which compiles
-  `foldscan-domain` via path and exercises the 14 shell unit tests).
+  `foldscan-domain` via path and exercises the 16 shell unit tests).
 
 ## Verified / not verified (honesty box)
 

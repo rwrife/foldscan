@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { renderOcrReview, type OcrReviewResult } from "./reviewOcr";
 
 import {
   createExportExecutionRequest,
@@ -89,6 +90,13 @@ const exportPreviewStatus = document.getElementById("export-preview-status");
 const exportPreviewResults = document.getElementById("export-preview-results");
 const exportStatus = document.getElementById("export-status");
 const exportResults = document.getElementById("export-results");
+const ocrForm = document.getElementById("ocr-form");
+const ocrPath = document.getElementById("ocr-export-path");
+const ocrDigest = document.getElementById("ocr-digest");
+const ocrChooseFolder = document.getElementById("ocr-choose-folder");
+const ocrStatus = document.getElementById("ocr-status");
+const ocrResults = document.getElementById("ocr-results");
+let ocrGeneration = 0;
 
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
@@ -579,6 +587,64 @@ async function chooseImportFolder(): Promise<void> {
 if (chooseFolderButton instanceof HTMLButtonElement) {
   chooseFolderButton.addEventListener("click", () => {
     void chooseImportFolder();
+  });
+}
+
+function clearOcrReview(): number {
+  ocrGeneration += 1;
+  ocrResults?.replaceChildren();
+  if (ocrStatus) ocrStatus.textContent = "No export reviewed.";
+  return ocrGeneration;
+}
+
+if (ocrForm instanceof HTMLFormElement &&
+    ocrPath instanceof HTMLInputElement &&
+    ocrDigest instanceof HTMLInputElement && ocrStatus && ocrResults) {
+  ocrPath.addEventListener("input", clearOcrReview);
+  ocrDigest.addEventListener("input", clearOcrReview);
+  ocrForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const generation = clearOcrReview();
+    const exportPath = ocrPath.value.trim();
+    const reviewedDigest = ocrDigest.value.trim();
+    if (!exportPath || !/^[0-9a-f]{64}$/.test(reviewedDigest)) {
+      ocrStatus.textContent = "Enter an export directory and a reviewed lowercase SHA-256 digest.";
+      return;
+    }
+    ocrStatus.textContent = "Verifying exported OCR locally…";
+    void invoke<OcrReviewResult>("review_exported_ocr", { exportPath, reviewedDigest })
+      .then((result) => {
+        if (generation !== ocrGeneration) return;
+        if (result.status === "err") {
+          ocrStatus.textContent = `OCR review failed (${result.error.category}): ${result.error.message}`;
+          return;
+        }
+        renderOcrReview(ocrResults, result.review);
+        ocrStatus.textContent = `OCR review ready: ${result.review.documents.length} completed documents. Text is in memory only.`;
+      })
+      .catch(() => {
+        if (generation === ocrGeneration) ocrStatus.textContent = "OCR review command unavailable.";
+      });
+  });
+}
+
+if (ocrChooseFolder instanceof HTMLButtonElement && ocrPath instanceof HTMLInputElement && ocrStatus) {
+  ocrChooseFolder.addEventListener("click", () => {
+    clearOcrReview();
+    ocrChooseFolder.disabled = true;
+    ocrStatus.textContent = "Opening the system export folder picker…";
+    void open({ directory: true, multiple: false, title: "Choose a local FoldScan export" })
+      .then((selected) => {
+        if (selected === null) {
+          ocrStatus.textContent = "Folder selection cancelled. No OCR was reviewed.";
+        } else {
+          ocrPath.value = selected;
+          ocrStatus.textContent = "Folder selected. Enter the independent reviewed digest, then review.";
+          ocrPath.focus();
+        }
+      })
+      .catch(() => { ocrStatus.textContent = "Export folder picker unavailable."; })
+      .finally(() => { ocrChooseFolder.disabled = false; });
   });
 }
 
