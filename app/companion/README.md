@@ -6,8 +6,8 @@ formatting/lint gates, tests, and clean CI builds on the Linux host this
 project can build.
 
 This shell additionally exposes **one bounded import probe, in-memory review plan,
-read-only export preview, and real single-session export execution** (issues
-#39, #41, #43, #47, and #49): the user can
+read-only export preview, and real single-session export execution with optional ordered PDF generation** (issues
+#39, #41, #43, #47, #49, and #57): the user can
 choose a mounted-volume directory through the native system picker or enter its
 path manually. The UI sends that path to `import_volume_summary`, the shell runs
 the already-tested `foldscan_domain::import_volume` pipeline, and the verified
@@ -29,8 +29,18 @@ refuses to overwrite an existing export root. The destination subdirectory is
 deterministic (`foldscan-export-<session>-<12-hex-digest-prefix>`), so
 re-running an identical reviewed export is refused rather than duplicating
 bytes. Source originals are re-read from the importer's verified host paths and
-are never modified. The shell still contains
-**no image thumbnail decoding, image processing, or cancellation/progress UI**.
+are never modified. An unchecked, per-session PDF checkbox preserves the original-only
+behavior. Checking it chooses explicit PDF preview/execution commands: only declared
+8-bit grayscale PNG originals are accepted (JPEG, RGB/palette PNG, corrupt PNG,
+and checksum changes fail without writing a destination). Validated PNG frames
+are decoded with a 64 MiB aggregate pixel budget and assembled in the reviewed
+order into a local PDF; the document's page dimensions, byte length and SHA-256
+are bound to the portable manifest. The PDF and original PNGs are exported
+through the same staged executor. Both modes rebuild their plans on every call;
+preview is read-only, and existing export roots are never overwritten. This
+option does not perform JPEG conversion, OCR, or processing and makes no cloud
+requests. The shell still contains **no image thumbnails, processing controls,
+or cancellation/progress UI**.
 
 ## Read-only OCR export review (#55)
 
@@ -114,7 +124,7 @@ needs a desktop session; CI does not launch a GUI.
 ## What CI verifies (`.github/workflows/app-companion.yml`)
 
 - `ui` job: `npm ci` from the committed lockfile, seven deterministic
-  review-plan and request tests, one inert-OCR-renderer test, three accessibility-regression tests, then
+  review-plan and request tests, one PDF command-selection test, one inert-OCR-renderer test, three accessibility-regression tests, then
   `tsc --noEmit` + a production Vite build on `ubuntu-latest` (Node 22). The
   review tests exercise initial manifest order, export preview request
   construction, export execution request construction, movement and boundary
@@ -128,7 +138,7 @@ needs a desktop session; CI does not launch a GUI.
 - `backend` job: apt-install of the Tauri Linux prerequisites, then
   `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`,
   and `cargo test --locked` against the shell crate (which compiles
-  `foldscan-domain` via path and exercises the 16 shell unit tests).
+  `foldscan-domain` via path and exercises the 21 shell unit tests).
 
 ## Verified / not verified (honesty box)
 
@@ -179,9 +189,14 @@ Not verified — explicitly out of scope for this scaffold:
   launched GUI; keyboard-only, screen-reader, and focus-restore behavior of
   the rendered list and status regions need desktop acceptance testing.
 - Export execution is limited to headless fixture evidence: one session,
-  original-only exports, host filesystem only (real removable media not
-  mounted), no cooperative cancellation or progress events yet (the domain
-  `execute_export_cancellable` seam exists but the shell does not wire it).
+  original-only or explicitly requested grayscale-PNG PDF exports on the host
+  filesystem only (real removable media not mounted); no cooperative
+  cancellation or progress events yet (the domain `execute_export_cancellable`
+  seam exists but the shell does not wire it). The PDF output has not been
+  opened in a GUI viewer in this run; domain writer tests independently
+  exercised PDF structure. Filesystem replacement between import and source
+  open remains a TOCTOU limit: checksum validation detects changed bytes but
+  does not pin a verified filesystem snapshot.
 - Automated accessibility evidence is limited to axe-detectable semantic
   structure in the initial and representative populated states. Native picker
   focus return, keyboard journeys in a launched WebView, screen-reader output,

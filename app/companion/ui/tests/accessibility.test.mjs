@@ -121,6 +121,12 @@ function renderRepresentativeImportAndReview(document) {
   removed.append(removedItem);
   session.append(removedHeading, removed);
 
+  const pdfLabel = document.createElement("label");
+  const pdfCheckbox = document.createElement("input");
+  pdfCheckbox.type = "checkbox";
+  pdfLabel.append(pdfCheckbox, " Include ordered PDF (8-bit grayscale PNG captures only)");
+  session.append(pdfLabel);
+
   const previewButton = document.createElement("button");
   previewButton.type = "button";
   previewButton.textContent = "Preview export for fixture-session";
