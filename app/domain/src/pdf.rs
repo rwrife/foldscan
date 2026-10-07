@@ -216,9 +216,12 @@ pub fn export_pdf(pages: &[GrayFrame]) -> Result<Vec<u8>, DomainError> {
 
         // Content is a stream object: build its body first so /Length is
         // exact, then wrap. (It draws the page's image XObject scaled to
-        // the MediaBox.)
+        // the MediaBox. An image XObject occupies the unit square, so the
+        // CTM must scale by BOTH axes — scaling only the height would
+        // render every page as a 1-point-wide strip. See
+        // ISO 32000-1 §8.9.8 (XObject dictionaries) and §8.3.2.3 (CTM).)
         offsets[content_num] = mark(&out)?;
-        let body = format!("q\n1 0 0 {} 0 0 cm\n/Im0 Do\nQ", chk.h);
+        let body = format!("q\n{w} 0 0 {h} 0 0 cm\n/Im0 Do\nQ", w = chk.w, h = chk.h);
         out.extend_from_slice(
             format!(
                 "{content_num} 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
@@ -387,9 +390,9 @@ fn check_document(doc: &[u8], checks: &[PageCheck<'_>], n_total: usize) -> Resul
             .map_err(|_| DomainError::internal("self-check: xref offset malformed"))?;
         obj_offsets[i] = off;
         let want = format!("{i} 0 obj");
-        if !doc
+        if doc
             .get(off..off + want.len())
-            .is_some_and(|w| w == want.as_bytes())
+            .is_none_or(|w| w != want.as_bytes())
         {
             return Err(DomainError::internal(format!(
                 "self-check: xref offset for object {i} does not point at its header"
@@ -397,8 +400,26 @@ fn check_document(doc: &[u8], checks: &[PageCheck<'_>], n_total: usize) -> Resul
         }
     }
 
-    // Per page: image stream payload re-inflates to the exact source frame.
+    // Per page: image stream payload re-inflates to the exact source frame,
+    // and content stream scales Im0 to full MediaBox dimensions (w x h).
     for (i, chk) in checks.iter().enumerate() {
+        let content_num = page_obj_num(i) + 1;
+        let content_at = obj_offsets[content_num];
+        let content_marker = doc
+            .get(content_at..doc.len().min(content_at + 300))
+            .ok_or_else(|| DomainError::internal("self-check: content object slice empty"))?;
+        let expected_cm = format!("q\n{} 0 0 {} 0 0 cm\n/Im0 Do\nQ", chk.w, chk.h);
+        if !content_marker
+            .windows(expected_cm.len())
+            .any(|w| w == expected_cm.as_bytes())
+        {
+            return Err(DomainError::internal(format!(
+                "self-check: content object {content_num} misses required {w}x{h} image scaling",
+                w = chk.w,
+                h = chk.h
+            )));
+        }
+
         let image_num = page_obj_num(i) + 2;
         let image_at = obj_offsets[image_num];
         let marker = doc
@@ -409,9 +430,9 @@ fn check_document(doc: &[u8], checks: &[PageCheck<'_>], n_total: usize) -> Resul
             chk.w, chk.h, chk.s_len
         );
         let header_len = format!("{image_num} 0 obj\n").len();
-        if !marker
+        if marker
             .get(header_len..header_len + want_dict.len())
-            .is_some_and(|w| w == want_dict.as_bytes())
+            .is_none_or(|w| w != want_dict.as_bytes())
         {
             return Err(DomainError::internal(format!(
                 "self-check: image object {image_num} dictionary mismatch"
@@ -531,13 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn self_check_rejects_one_point_wide_rendering() {
+        let frame = lcg_page(5, 4, 11);
+        let mut doc = export_pdf(std::slice::from_ref(&frame)).unwrap();
+        let transform = b"q\n5 0 0 4 0 0 cm";
+        let at = doc
+            .windows(transform.len())
+            .position(|w| w == transform)
+            .unwrap();
+        doc[at + 2] = b'1'; // Same byte length: xref and embedded pixels remain valid.
+        let stream = zlib_stored(&frame.pixels);
+        let checks = [PageCheck {
+            w: 5,
+            h: 4,
+            p_len: 20,
+            s_len: stream.len() as u32,
+            payload: &frame.pixels,
+        }];
+        let err = check_document(&doc, &checks, object_count(1) + 1).unwrap_err();
+        assert!(err.message.contains("image scaling"));
+    }
+
+    #[test]
     fn output_is_deterministic_and_single_page_digest_pinned() {
         let a = export_pdf(&[lcg_page(5, 4, 11)]).expect("one-page doc");
         let b = export_pdf(&[lcg_page(5, 4, 11)]).expect("again");
         assert_eq!(a, b);
         assert_eq!(
             sha256_hex(&a),
-            "9413e09ab8b7762480862ada3bca909e04175184d8ece6cf9a6d00f220d31bc3",
+            "d2567e298bc6f1211f0fd0700a29b45eff400add79b207fa966ccfe3984acced",
             "deterministic 1-page output digest drifted"
         );
     }
@@ -548,7 +591,7 @@ mod tests {
             .expect("three-page doc");
         assert_eq!(
             sha256_hex(&doc),
-            "ca6b12880167c815e1fc53eee9af5c55f18a5b0de3a320f58d1bb83720c12772",
+            "479fded4f2125741af6a41d333581c7054ad97287e8e1f63ad56a4cdecaee738",
             "deterministic 3-page output digest drifted"
         );
         assert!(doc.starts_with(b"%PDF-1.4\n"));

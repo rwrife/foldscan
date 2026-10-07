@@ -4,7 +4,7 @@
   "fixtures": [
     {
       "file": "one_page_5x4.pdf",
-      "sha256": "9413e09ab8b7762480862ada3bca909e04175184d8ece6cf9a6d00f220d31bc3",
+      "sha256": "d2567e298bc6f1211f0fd0700a29b45eff400add79b207fa966ccfe3984acced",
       "pages": [
         {
           "w": 5,
@@ -16,7 +16,7 @@
     },
     {
       "file": "three_pages.pdf",
-      "sha256": "ca6b12880167c815e1fc53eee9af5c55f18a5b0de3a320f58d1bb83720c12772",
+      "sha256": "479fded4f2125741af6a41d333581c7054ad97287e8e1f63ad56a4cdecaee738",
       "pages": [
         {
           "w": 16,

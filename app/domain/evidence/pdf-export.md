@@ -57,8 +57,8 @@ LCG frame, recorded as `GrayFrame::digest()` recipes in
 `tests/fixtures/pdf/manifest.json`). All generation-time assertions passed:
 
 ```text
-OK one_page_5x4.pdf: 1 page(s), sha256=9413e09ab8b77624…
-OK three_pages.pdf: 3 page(s), sha256=ca6b12880167c815…
+OK one_page_5x4.pdf: 1 page(s), sha256=d2567e298bc6f121…
+OK three_pages.pdf: 3 page(s), sha256=479fded4f2125741…
 wrote manifest.json
 ```
 
@@ -79,7 +79,12 @@ our exact pixels from the container we produced.
   wants real physical page sizes it must add unit metadata deliberately.
 - The export executor and `foldscan.export/0.1` manifest do not yet know
   how to carry a PDF derivative; that integration is a later slice
-  decision (deliberately out of scope here).
+  decision (deliberately out of scope here). (Issue #57 subsequently wired
+  explicit companion-side PDF assembly, using the planner/manifest
+  `SessionDocument` binding added in #31.)
 - Fixture bytes are self-generated (our writer produced them); independence
   is only on the *parse* side, exactly as with the PNG encoder's pinned
   output. Stated so no one over-reads the evidence.
+- Generation-time PyMuPDF assertions cover MediaBox geometry, exact page
+  count, single image XObject presence, pixel-exact samples, and rendered
+  gray page samples (asserting CTM `w 0 0 h 0 0 cm` scales to the full page).

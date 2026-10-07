@@ -103,6 +103,9 @@ def validate(path: Path, frames):
         got = pix.samples
         want = lcg_bytes(w, h, seed)
         assert got == want, f"{path} page {i}: decoded pixels differ from source frame"
+        rendered = page.get_pixmap(colorspace=pymupdf.csGRAY, alpha=False)
+        assert rendered.width == w and rendered.height == h
+        assert rendered.samples == want, f"{path} page {i}: rendered page differs from source frame"
         per_page.append({"w": w, "h": h, "seed": seed, "digest": gray_digest(w, h, want)})
     doc.close()
     return per_page

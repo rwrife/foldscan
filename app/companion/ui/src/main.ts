@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { exportCommands } from "./exportMode";
 import { renderOcrReview, type OcrReviewResult } from "./reviewOcr";
 
 import {
@@ -101,6 +102,8 @@ let ocrGeneration = 0;
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
 let currentVolumePath = "";
+// Only this in-memory review session owns the choice; no filesystem persistence.
+const pdfSelections = new Map<string, boolean>();
 
 function renderStatus(text: string): void {
   if (statusElement) {
@@ -242,6 +245,18 @@ function renderReviewPlan(): void {
       section.append(removedList);
     }
 
+    const pdfLabel = document.createElement("label");
+    const pdfCheckbox = document.createElement("input");
+    pdfCheckbox.type = "checkbox";
+    pdfCheckbox.dataset.pdfSessionId = session.sessionId;
+    pdfCheckbox.checked = pdfSelections.get(session.sessionId) ?? false;
+    pdfCheckbox.addEventListener("change", () => {
+      pdfSelections.set(session.sessionId, pdfCheckbox.checked);
+      clearExportPreview();
+    });
+    pdfLabel.append(pdfCheckbox, " Include ordered PDF (8-bit grayscale PNG captures only)");
+    section.append(pdfLabel);
+
     const previewButton = document.createElement("button");
     previewButton.type = "button";
     previewButton.textContent = `Preview export for ${session.sessionId}`;
@@ -301,6 +316,10 @@ function renderExportPreview(result: ExportPreviewResult): void {
   exportPreviewResults.append(heading, list);
 }
 
+function wantsPdf(sessionId: string): boolean {
+  return pdfSelections.get(sessionId) ?? false;
+}
+
 async function previewExport(sessionId: string): Promise<void> {
   if (!exportPreviewStatus || !exportPreviewResults) {
     return;
@@ -328,7 +347,7 @@ async function previewExport(sessionId: string): Promise<void> {
 
   const req = createExportPreviewRequest(currentVolumePath, session);
   try {
-    const result = await invoke<ExportPreviewResult>("preview_export_plan", {
+    const result = await invoke<ExportPreviewResult>(exportCommands(wantsPdf(sessionId)).preview, {
       volumePath: req.volumePath,
       sessionId: req.sessionId,
       captureIds: req.captureIds,
@@ -400,6 +419,7 @@ async function exportSessionToFolder(sessionId: string): Promise<void> {
     return;
   }
 
+  const pdf = wantsPdf(sessionId);
   exportStatus.textContent = "Opening the system destination folder picker…";
   exportResults.replaceChildren();
   let destinationPath: string;
@@ -423,7 +443,7 @@ async function exportSessionToFolder(sessionId: string): Promise<void> {
   exportStatus.textContent = `Exporting session ${sessionId} into ${destinationPath}…`;
   const req = createExportExecutionRequest(currentVolumePath, destinationPath, session);
   try {
-    const result = await invoke<ExportExecutionResult>("execute_export_plan", {
+    const result = await invoke<ExportExecutionResult>(exportCommands(pdf).execute, {
       volumePath: req.volumePath,
       destinationPath: req.destinationPath,
       sessionId: req.sessionId,
@@ -440,6 +460,7 @@ function clearImportDetails(): void {
   currentSummary = null;
   currentPlan = null;
   currentVolumePath = "";
+  pdfSelections.clear();
   if (importResults) {
     importResults.replaceChildren();
   }

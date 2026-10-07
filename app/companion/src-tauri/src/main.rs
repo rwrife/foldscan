@@ -483,6 +483,155 @@ pub fn preview_export_plan_path(
     }
 }
 
+fn canonical_pdf_plan(
+    session_id: &str,
+    selected: &[ImportedCapture],
+) -> Result<(foldscan_domain::export::ExportPlan, ExportManifest, Vec<u8>), DomainError> {
+    for capture in selected {
+        if capture.media_type != "image/png" {
+            return Err(invalid_request(format!(
+                "PDF export requires image/png captures; capture {} declared media_type {}",
+                capture.capture_id, capture.media_type
+            )));
+        }
+    }
+
+    // Limit retained decoded frames separately from the writer's output bound.
+    // One decode is already dimension-bounded by the domain codec.
+    const MAX_PDF_FRAME_BYTES: usize = 64 * 1024 * 1024;
+    let mut retained_pixels = 0usize;
+    let mut frames = Vec::with_capacity(selected.len());
+    let mut doc_pages = Vec::with_capacity(selected.len());
+    for capture in selected {
+        use std::io::Read;
+        let metadata = std::fs::symlink_metadata(&capture.host_path)
+            .map_err(|_| DomainError::storage_unavailable("cannot inspect PDF source"))?;
+        if !metadata.file_type().is_file() {
+            return Err(invalid_request(
+                "PDF source must be a regular non-symlink file",
+            ));
+        }
+        let file = std::fs::File::open(&capture.host_path)
+            .map_err(|_| DomainError::storage_unavailable("cannot open PDF source"))?;
+        let mut bytes = Vec::new();
+        file.take(
+            capture
+                .bytes
+                .min(foldscan_domain::limits::MAX_CAPTURE_BYTES)
+                + 1,
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            DomainError::storage_unavailable(format!(
+                "cannot read capture {} for PDF export: {}",
+                capture.capture_id, e
+            ))
+        })?;
+        if bytes.len() as u64 != capture.bytes {
+            return Err(invalid_request(format!(
+                "capture {} file size changed before PDF export",
+                capture.capture_id
+            )));
+        }
+        if foldscan_domain::checksum::sha256_hex(&bytes) != capture.sha256 {
+            return Err(DomainError::checksum_mismatch(format!(
+                "capture {} checksum mismatch before PDF export",
+                capture.capture_id
+            )));
+        }
+        let frame = foldscan_domain::png::decode_png(&bytes).map_err(|e| {
+            DomainError::invalid_request(format!(
+                "capture {} PNG decode failed for PDF export: {}",
+                capture.capture_id, e.message
+            ))
+        })?;
+        retained_pixels = retained_pixels
+            .checked_add(frame.pixels.len())
+            .ok_or_else(|| invalid_request("PDF decoded frame budget overflow"))?;
+        if retained_pixels > MAX_PDF_FRAME_BYTES {
+            return Err(invalid_request(
+                "PDF decoded frames exceed 64 MiB memory budget",
+            ));
+        }
+        doc_pages.push(foldscan_domain::DocumentPage {
+            capture_id: capture.capture_id.clone(),
+            width_px: frame.width,
+            height_px: frame.height,
+        });
+        frames.push(frame);
+    }
+
+    let pdf_bytes = foldscan_domain::export_pdf(&frames)?;
+    let doc = foldscan_domain::SessionDocument {
+        media_type: "application/pdf".to_string(),
+        sha256: foldscan_domain::checksum::sha256_hex(&pdf_bytes),
+        bytes: pdf_bytes.len() as u64,
+        pages: doc_pages,
+    };
+
+    let mut export_sessions = export_sessions_from_import(&[ImportedSession {
+        session_id: session_id.to_string(),
+        captures: selected.to_vec(),
+    }]);
+    let session = export_sessions
+        .first_mut()
+        .ok_or_else(|| DomainError::internal("export session synthesis produced no sessions"))?;
+    session.document = Some(doc);
+    session.ocr.clear();
+    session.ocr_text = false;
+
+    let plan = plan_export(&export_sessions, &[])?;
+    let manifest = ExportManifest::from_plan(&plan, session_id)?;
+    Ok((plan, manifest, pdf_bytes))
+}
+
+fn build_pdf_export_preview(
+    imported: &ImportPlan,
+    session_id: &str,
+    capture_ids: &[String],
+) -> Result<ExportPreview, DomainError> {
+    let selected = select_captures(imported, session_id, capture_ids)?;
+    let (plan, manifest, _) = canonical_pdf_plan(session_id, &selected)?;
+
+    let files = plan
+        .files
+        .iter()
+        .map(|file| {
+            let content_kind = content_kind_tag(file.content_kind).to_string();
+            ExportPreviewFile {
+                relative_path: file.relative_path.clone(),
+                capture_id: file.capture_id.clone(),
+                content_kind,
+            }
+        })
+        .collect();
+
+    Ok(ExportPreview {
+        schema: EXPORT_PREVIEW_SCHEMA.to_string(),
+        manifest_schema: manifest.schema.clone(),
+        session_id: session_id.to_string(),
+        capture_ids: capture_ids.to_vec(),
+        files,
+        manifest_digest: manifest.digest(),
+    })
+}
+
+pub fn preview_pdf_export_plan_path(
+    volume_root: &Path,
+    session_id: &str,
+    capture_ids: &[String],
+) -> ExportPreviewResult {
+    let imported = match import_volume(volume_root) {
+        Ok(plan) => plan,
+        Err(err) => return map_preview_error(err),
+    };
+
+    match build_pdf_export_preview(&imported, session_id.trim(), capture_ids) {
+        Ok(preview) => ExportPreviewResult::Ok { preview },
+        Err(err) => map_preview_error(err),
+    }
+}
+
 fn map_execution_error(err: DomainError) -> ExportExecutionResult {
     ExportExecutionResult::Err {
         error: ImportFailure {
@@ -509,6 +658,26 @@ fn run_export(
     // then re-reads originals from these verified host paths only.
     let selected = select_captures(imported, session_id, capture_ids)?;
     let (plan, manifest) = canonical_original_plan(session_id, &selected)?;
+    finish_export(
+        destination_parent,
+        session_id,
+        capture_ids,
+        &selected,
+        &plan,
+        &manifest,
+        HashMap::new(),
+    )
+}
+
+fn finish_export(
+    destination_parent: &Path,
+    session_id: &str,
+    capture_ids: &[String],
+    selected: &[ImportedCapture],
+    plan: &foldscan_domain::ExportPlan,
+    manifest: &ExportManifest,
+    mut sources: HashMap<String, ExportSource>,
+) -> Result<ExportExecutionSummary, DomainError> {
     let digest = manifest.digest();
 
     // Deterministic, collision-resistant destination: session id (already
@@ -522,7 +691,6 @@ fn run_export(
         &digest[..EXPORT_DIR_DIGEST_PREFIX]
     ));
 
-    let mut sources: HashMap<String, ExportSource> = HashMap::new();
     for file in &plan.files {
         if file.content_kind == ContentKind::Original {
             let cid = file
@@ -542,7 +710,7 @@ fn run_export(
         }
     }
 
-    let exec = execute_export(&plan, &root, &sources, &manifest)?;
+    let exec = execute_export(plan, &root, &sources, manifest)?;
     Ok(ExportExecutionSummary {
         schema: EXPORT_EXECUTION_SCHEMA.to_string(),
         session_id: session_id.to_string(),
@@ -578,6 +746,70 @@ pub fn execute_export_plan_path(
         Ok(execution) => ExportExecutionResult::Ok { execution },
         Err(err) => map_execution_error(err),
     }
+}
+
+/// Explicit PNG-only PDF export. Decode/assemble before any destination write.
+pub fn execute_pdf_export_plan_path(
+    volume_root: &Path,
+    destination_parent: &Path,
+    session_id: &str,
+    capture_ids: &[String],
+) -> ExportExecutionResult {
+    let result = (|| {
+        if destination_parent.as_os_str().is_empty() {
+            return Err(invalid_request("destination parent directory is empty"));
+        }
+        let imported = import_volume(volume_root)?;
+        let selected = select_captures(&imported, session_id.trim(), capture_ids)?;
+        let (plan, manifest, pdf) = canonical_pdf_plan(session_id.trim(), &selected)?;
+        let document = plan
+            .files
+            .iter()
+            .find(|f| f.content_kind == ContentKind::Document)
+            .ok_or_else(|| DomainError::internal("PDF plan missing document"))?;
+        let sources = HashMap::from([(document.relative_path.clone(), ExportSource::bytes(pdf))]);
+        finish_export(
+            destination_parent,
+            session_id.trim(),
+            capture_ids,
+            &selected,
+            &plan,
+            &manifest,
+            sources,
+        )
+    })();
+    match result {
+        Ok(execution) => ExportExecutionResult::Ok { execution },
+        Err(err) => map_execution_error(err),
+    }
+}
+
+#[tauri::command]
+fn execute_pdf_export_plan(
+    volume_path: String,
+    destination_path: String,
+    session_id: String,
+    capture_ids: Vec<String>,
+) -> ExportExecutionResult {
+    execute_pdf_export_plan_path(
+        Path::new(volume_path.trim()),
+        Path::new(destination_path.trim()),
+        session_id.trim(),
+        &capture_ids,
+    )
+}
+
+#[tauri::command]
+fn preview_pdf_export_plan(
+    volume_path: String,
+    session_id: String,
+    capture_ids: Vec<String>,
+) -> ExportPreviewResult {
+    preview_pdf_export_plan_path(
+        Path::new(volume_path.trim()),
+        session_id.trim(),
+        &capture_ids,
+    )
 }
 
 /// The command registered by the scaffold. It performs no I/O and
@@ -637,6 +869,8 @@ fn main() {
             import_volume_summary,
             preview_export_plan,
             execute_export_plan,
+            preview_pdf_export_plan,
+            execute_pdf_export_plan,
             review_exported_ocr
         ])
         .run(tauri::generate_context!())
@@ -692,6 +926,247 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    fn create_png_fixture(root: &Path) -> Vec<(String, Vec<u8>, u32, u32)> {
+        create_valid_fixture(root);
+        let session = root.join("FOLDSCAN/sessions/sess-001");
+        let frames = [
+            foldscan_domain::GrayFrame::from_pixels(3, 2, vec![0, 30, 60, 90, 120, 150]).unwrap(),
+            foldscan_domain::GrayFrame::from_pixels(2, 3, vec![10, 20, 30, 40, 50, 60]).unwrap(),
+        ];
+        let captures: Vec<_> = frames
+            .iter()
+            .enumerate()
+            .map(|(i, frame)| {
+                let id = format!("cap-{}", i + 1);
+                let bytes = foldscan_domain::png::encode_png(frame).unwrap();
+                fs::write(session.join(format!("captures/{id}.png")), &bytes).unwrap();
+                (id, bytes, frame.width, frame.height)
+            })
+            .collect();
+        let entries: Vec<_> = captures.iter().map(|(id, bytes, w, h)| serde_json::json!({
+            "capture_id": id, "relative_path": format!("captures/{id}.png"), "media_type": "image/png",
+            "bytes": bytes.len(), "sha256": sha256_hex(bytes), "width_px": w, "height_px": h,
+            "orientation": 1, "captured_at": null
+        })).collect();
+        fs::write(
+            session.join("session.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "foldscan.session/0.1", "session_id": "sess-001",
+                "created_at": null, "clock_state": "unsynced", "captures": entries
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        captures
+    }
+
+    #[test]
+    fn preview_pdf_export_lists_document_file_and_validates_png_only() {
+        let volume = TempDir::new().unwrap();
+        create_png_fixture(volume.path());
+        let order = vec!["cap-1".to_string(), "cap-2".to_string()];
+        let ExportPreviewResult::Ok { preview } =
+            preview_pdf_export_plan_path(volume.path(), "sess-001", &order)
+        else {
+            panic!("preview must succeed for valid PNG session")
+        };
+        assert_eq!(preview.session_id, "sess-001");
+        assert_eq!(preview.capture_ids, order);
+        let doc_file = preview
+            .files
+            .iter()
+            .find(|f| f.content_kind == "document")
+            .expect("planned document");
+        assert_eq!(doc_file.relative_path, "documents/sess-001/session.pdf");
+        assert!(doc_file.capture_id.is_none());
+
+        // JPEG volume rejected during preview
+        let jpeg_volume = TempDir::new().unwrap();
+        create_valid_fixture(jpeg_volume.path());
+        let err =
+            preview_pdf_export_plan_path(jpeg_volume.path(), "sess-001", &["cap-1".to_string()]);
+        assert!(
+            matches!(err, ExportPreviewResult::Err { error } if error.category == "invalid_request")
+        );
+    }
+
+    #[test]
+    fn pdf_export_binds_reviewed_order_dimensions_and_preserves_originals() {
+        let volume = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let captures = create_png_fixture(volume.path());
+        let order = vec!["cap-2".to_string(), "cap-1".to_string()];
+        let ExportExecutionResult::Ok { execution } =
+            execute_pdf_export_plan_path(volume.path(), destination.path(), "sess-001", &order)
+        else {
+            panic!("PNG PDF export must succeed")
+        };
+        assert_eq!(execution.capture_ids, order);
+        let root = Path::new(&execution.root);
+        let pdf = fs::read(root.join("documents/sess-001/session.pdf")).unwrap();
+        let expected = foldscan_domain::export_pdf(&[
+            foldscan_domain::png::decode_png(&captures[1].1).unwrap(),
+            foldscan_domain::png::decode_png(&captures[0].1).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(pdf, expected);
+        let manifest = foldscan_domain::ExportManifest::from_json_bytes(
+            &fs::read(root.join("export.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.digest(), execution.manifest_digest);
+        let ExportPreviewResult::Ok { preview } =
+            preview_pdf_export_plan_path(volume.path(), "sess-001", &order)
+        else {
+            panic!("PDF preview")
+        };
+        assert_eq!(preview.manifest_digest, manifest.digest());
+        assert_eq!(execution.files_written, 4);
+        let document = manifest.document.as_ref().unwrap();
+        assert_eq!(document.sha256, sha256_hex(&pdf));
+        assert_eq!(document.bytes, pdf.len() as u64);
+        assert_eq!(
+            document
+                .pages
+                .iter()
+                .map(|p| (p.capture_id.as_str(), p.width_px, p.height_px))
+                .collect::<Vec<_>>(),
+            vec![("cap-2", 2, 3), ("cap-1", 3, 2)]
+        );
+        for (id, bytes, _, _) in &captures {
+            assert_eq!(
+                fs::read(
+                    volume
+                        .path()
+                        .join(format!("FOLDSCAN/sessions/sess-001/captures/{id}.png"))
+                )
+                .unwrap(),
+                *bytes
+            );
+            assert_eq!(
+                fs::read(root.join(format!("originals/sess-001/{id}.png"))).unwrap(),
+                *bytes
+            );
+        }
+        assert!(matches!(
+            execute_pdf_export_plan_path(volume.path(), destination.path(), "sess-001", &order),
+            ExportExecutionResult::Err { .. }
+        ));
+    }
+
+    #[test]
+    fn pdf_export_rejects_jpeg_and_corrupt_png_before_destination_mutation() {
+        let volume = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        create_valid_fixture(volume.path());
+        let ids = vec!["cap-1".to_string()];
+        let result =
+            execute_pdf_export_plan_path(volume.path(), destination.path(), "sess-001", &ids);
+        assert!(
+            matches!(result, ExportExecutionResult::Err { error } if error.category == "invalid_request")
+        );
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+        let captures = create_png_fixture(volume.path());
+        let png = volume
+            .path()
+            .join("FOLDSCAN/sessions/sess-001/captures/cap-1.png");
+        let mut corrupt = captures[0].1.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 1;
+        fs::write(&png, &corrupt).unwrap();
+        // Update the declaration so import passes; exercise the PNG decoder,
+        // not just the import checksum guard.
+        let session_path = volume
+            .path()
+            .join("FOLDSCAN/sessions/sess-001/session.json");
+        let mut session: serde_json::Value =
+            serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+        session["captures"][0]["sha256"] = serde_json::json!(sha256_hex(&corrupt));
+        fs::write(session_path, serde_json::to_vec(&session).unwrap()).unwrap();
+        let result =
+            execute_pdf_export_plan_path(volume.path(), destination.path(), "sess-001", &ids);
+        assert!(matches!(result, ExportExecutionResult::Err { .. }));
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+
+        for fixture in ["rgb_4x4.png", "palette_4x4.png"] {
+            // Unsupported color PNGs must fail before export.
+            let rgb_bytes = fs::read(format!("../../domain/tests/fixtures/png/{fixture}")).unwrap();
+            let session_path = volume
+                .path()
+                .join("FOLDSCAN/sessions/sess-001/session.json");
+            fs::write(
+                volume
+                    .path()
+                    .join("FOLDSCAN/sessions/sess-001/captures/cap-1.png"),
+                &rgb_bytes,
+            )
+            .unwrap();
+            let mut session: serde_json::Value =
+                serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+            session["captures"][0]["bytes"] = serde_json::json!(rgb_bytes.len());
+            session["captures"][0]["sha256"] = serde_json::json!(sha256_hex(&rgb_bytes));
+            fs::write(session_path, serde_json::to_vec(&session).unwrap()).unwrap();
+            let result =
+                execute_pdf_export_plan_path(volume.path(), destination.path(), "sess-001", &ids);
+            assert!(
+                matches!(result, ExportExecutionResult::Err { error } if error.category == "invalid_request")
+            );
+            assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn pdf_export_rolls_back_if_an_original_disappears_after_planning() {
+        let volume = TempDir::new().unwrap();
+        let destination = TempDir::new().unwrap();
+        let captures = create_png_fixture(volume.path());
+        let imported = import_volume(volume.path()).unwrap();
+        let order = vec!["cap-2".to_string(), "cap-1".to_string()];
+        let selected = select_captures(&imported, "sess-001", &order).unwrap();
+        let (plan, manifest, pdf) = canonical_pdf_plan("sess-001", &selected).unwrap();
+        let document = plan
+            .files
+            .iter()
+            .find(|f| f.content_kind == ContentKind::Document)
+            .unwrap();
+        let sources = HashMap::from([(document.relative_path.clone(), ExportSource::bytes(pdf))]);
+        // cap-2 is written before the missing cap-1; failure must remove it too.
+        fs::remove_file(&selected[1].host_path).unwrap();
+        assert!(finish_export(
+            destination.path(),
+            "sess-001",
+            &order,
+            &selected,
+            &plan,
+            &manifest,
+            sources
+        )
+        .is_err());
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+        assert_eq!(fs::read(&selected[0].host_path).unwrap(), captures[1].1);
+        fs::write(&selected[1].host_path, &captures[0].1).unwrap();
+        assert!(matches!(
+            execute_pdf_export_plan_path(volume.path(), destination.path(), "sess-001", &order),
+            ExportExecutionResult::Ok { .. }
+        ));
+    }
+
+    #[test]
+    fn pdf_plan_rechecks_checksum_and_refuses_a_changed_source() {
+        let volume = TempDir::new().unwrap();
+        let captures = create_png_fixture(volume.path());
+        let imported = import_volume(volume.path()).unwrap();
+        let selected = select_captures(&imported, "sess-001", &["cap-1".to_string()]).unwrap();
+        let mut changed = captures[0].1.clone();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        fs::write(&selected[0].host_path, &changed).unwrap();
+        assert!(
+            matches!(canonical_pdf_plan("sess-001", &selected), Err(err) if err.category == Category::ChecksumMismatch)
+        );
+        assert_eq!(fs::read(&selected[0].host_path).unwrap(), changed);
     }
 
     #[test]
