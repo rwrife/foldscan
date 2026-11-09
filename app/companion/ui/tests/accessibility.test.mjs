@@ -4,6 +4,7 @@ import test from "node:test";
 
 import axe from "axe-core";
 import { JSDOM, VirtualConsole } from "jsdom";
+import { renderCapturePreview } from "../src/capturePreview.ts";
 
 const indexUrl = new URL("../index.html", import.meta.url);
 const wcagRunOptions = {
@@ -93,7 +94,7 @@ function renderRepresentativeImportAndReview(document) {
     const controls = document.createElement("div");
     controls.className = "capture-controls";
 
-    for (const label of ["Move up", "Move down", "Remove"]) {
+    for (const label of ["Move up", "Move down", "Remove", `Preview image for ${captureId}`]) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = label;
@@ -162,6 +163,24 @@ function renderRepresentativeImportAndReview(document) {
     exportList.append(item);
   }
   exportResults.replaceChildren(exportHeading, exportList);
+
+  const imagePreviewStatus = document.getElementById("image-preview-status");
+  const imagePreviewResults = document.getElementById("image-preview-results");
+  if (imagePreviewStatus && imagePreviewResults) {
+    imagePreviewStatus.textContent = "Image preview ready. Source files were not modified.";
+    renderCapturePreview(imagePreviewResults, "fixture-session", "capture-001", {
+      status: "ok",
+      preview: {
+        schema: "foldscan.companion.capture_preview/0.1",
+        session_id: "fixture-session",
+        capture_id: "capture-001",
+        width_px: 3,
+        height_px: 2,
+        bytes: 72,
+        data_uri: "data:image/png;base64,iVBORw0KGgo=",
+      },
+    });
+  }
 }
 
 test("the initial companion document has no detectable WCAG A/AA violations", async () => {

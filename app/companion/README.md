@@ -42,6 +42,19 @@ option does not perform JPEG conversion, OCR, or processing and makes no cloud
 requests. The shell still contains **no image thumbnails, processing controls,
 or cancellation/progress UI**.
 
+## On-demand capture preview (#59)
+
+Each active capture has a `Preview image` button. Backend re-imports mounted
+volume, verifies selected capture is declared `image/png`, checks source size
+and SHA-256 again, decodes only 8-bit grayscale PNG under 8 MiB encoded and
+4 Mi-pixel limits, then re-encodes sanitized PNG bytes as an in-memory data URI.
+UI displays pixel dimensions, source byte count, and accessible image text.
+New imports clear prior preview. No cache, remote fetch, or source changes.
+Unsupported JPEG/color PNG, corrupt captures and stale files return tagged
+errors. Static fixture checks do not prove GUI rendering, mounted-media behavior
+or physical captures. Stable local volume snapshot remains required: symlink
+checks and file opens are not atomic against a concurrent mount mutation.
+
 ## Read-only OCR export review (#55)
 
 An existing local export with OCR sidecars can be inspected separately from
