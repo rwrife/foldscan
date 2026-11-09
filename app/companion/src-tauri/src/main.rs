@@ -861,6 +861,124 @@ fn review_exported_ocr(export_path: String, reviewed_digest: String) -> OcrRevie
     review_exported_ocr_path(Path::new(export_path.trim()), reviewed_digest.trim())
 }
 
+pub const CAPTURE_PREVIEW_SCHEMA: &str = "foldscan.companion.capture_preview/0.1";
+const MAX_PREVIEW_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PREVIEW_PIXELS: u64 = 4 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+pub struct CapturePreview {
+    pub schema: &'static str,
+    pub session_id: String,
+    pub capture_id: String,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub bytes: usize,
+    pub data_uri: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CapturePreviewResult {
+    Ok { preview: CapturePreview },
+    Err { error: ImportFailure },
+}
+
+/// Re-import validates volume entries and their checksums. Recheck selected file
+/// after import to detect changed media, then re-encode to strip ancillary chunks.
+fn capture_preview(
+    capture: &ImportedCapture,
+    session_id: &str,
+) -> Result<CapturePreview, DomainError> {
+    use base64::Engine;
+    use std::io::Read;
+    if capture.media_type != "image/png" || capture.bytes > MAX_PREVIEW_FILE_BYTES {
+        return Err(invalid_request(
+            "preview requires grayscale PNG at most 8 MiB encoded",
+        ));
+    }
+    let meta = std::fs::symlink_metadata(&capture.host_path)
+        .map_err(|_| DomainError::storage_unavailable("cannot inspect preview source"))?;
+    if !meta.file_type().is_file() {
+        return Err(invalid_request(
+            "preview source must be a regular non-symlink file",
+        ));
+    }
+    let file = std::fs::File::open(&capture.host_path)
+        .map_err(|_| DomainError::storage_unavailable("cannot open preview source"))?;
+    // Do not trust metadata alone: mount contents may change after re-import.
+    let mut bytes = Vec::new();
+    file.take(capture.bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DomainError::storage_unavailable("cannot read preview source"))?;
+    if bytes.len() as u64 != capture.bytes {
+        return Err(DomainError::checksum_mismatch(
+            "preview source size changed since import",
+        ));
+    }
+    if foldscan_domain::checksum::sha256_hex(&bytes) != capture.sha256 {
+        return Err(DomainError::checksum_mismatch(
+            "preview source checksum changed since import",
+        ));
+    }
+    // IHDR dimensions are only an allocation preflight; decode_png validates
+    // signature, IHDR CRC, dimensions, encoding, chunks and pixel stream.
+    if bytes.len() < 33 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+        return Err(invalid_request("preview source has no PNG header"));
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PREVIEW_PIXELS {
+        return Err(invalid_request(
+            "preview exceeds 4 Mi pixel budget or has zero dimensions",
+        ));
+    }
+    let frame = foldscan_domain::png::decode_png(&bytes)?;
+    // ponytail: full-size grayscale only; add bounded downsampling after codec review.
+    let clean = foldscan_domain::png::encode_png(&frame)?;
+    Ok(CapturePreview {
+        schema: CAPTURE_PREVIEW_SCHEMA,
+        session_id: session_id.into(),
+        capture_id: capture.capture_id.clone(),
+        width_px: frame.width,
+        height_px: frame.height,
+        bytes: bytes.len(),
+        data_uri: format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(clean)
+        ),
+    })
+}
+
+pub fn preview_capture_image_path(
+    volume: &Path,
+    session_id: &str,
+    capture_id: &str,
+) -> CapturePreviewResult {
+    let result = (|| {
+        let imported = import_volume(volume)?;
+        let selected = select_captures(&imported, session_id, &[capture_id.to_owned()])?;
+        capture_preview(&selected[0], session_id)
+    })();
+    match result {
+        Ok(preview) => CapturePreviewResult::Ok { preview },
+        Err(err) => CapturePreviewResult::Err {
+            error: ImportFailure {
+                category: category_tag(err.category).into(),
+                message: err.message,
+            },
+        },
+    }
+}
+
+#[tauri::command]
+fn preview_capture_image(
+    volume_path: String,
+    session_id: String,
+    capture_id: String,
+) -> CapturePreviewResult {
+    preview_capture_image_path(Path::new(volume_path.trim()), &session_id, &capture_id)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -871,7 +989,8 @@ fn main() {
             execute_export_plan,
             preview_pdf_export_plan,
             execute_pdf_export_plan,
-            review_exported_ocr
+            review_exported_ocr,
+            preview_capture_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -960,6 +1079,123 @@ mod tests {
         )
         .unwrap();
         captures
+    }
+
+    #[test]
+    fn capture_preview_returns_verified_png_and_pinned_shape() {
+        use base64::Engine;
+        let volume = TempDir::new().unwrap();
+        let captures = create_png_fixture(volume.path());
+        let result = preview_capture_image_path(volume.path(), "sess-001", "cap-1");
+        let CapturePreviewResult::Ok { preview } = result else {
+            panic!("PNG preview must succeed: {result:?}")
+        };
+        assert_eq!((preview.width_px, preview.height_px), (3, 2));
+        assert_eq!(preview.bytes, captures[0].1.len());
+        let cleaned = base64::engine::general_purpose::STANDARD
+            .decode(
+                preview
+                    .data_uri
+                    .strip_prefix("data:image/png;base64,")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            foldscan_domain::png::decode_png(&cleaned).unwrap().pixels,
+            foldscan_domain::png::decode_png(&captures[0].1)
+                .unwrap()
+                .pixels
+        );
+        let shape = serde_json::to_value(&preview).unwrap();
+        assert_eq!(shape["schema"], CAPTURE_PREVIEW_SCHEMA);
+        assert_eq!(shape["session_id"], "sess-001");
+        assert_eq!(shape["capture_id"], "cap-1");
+        assert_eq!(shape["bytes"], serde_json::json!(captures[0].1.len()));
+        assert_eq!(
+            serde_json::to_value(CapturePreviewResult::Ok { preview }).unwrap()["status"],
+            "ok"
+        );
+        assert_eq!(
+            fs::read(
+                volume
+                    .path()
+                    .join("FOLDSCAN/sessions/sess-001/captures/cap-1.png")
+            )
+            .unwrap(),
+            captures[0].1
+        );
+    }
+
+    #[test]
+    fn capture_preview_refuses_jpeg_unknown_ids_changed_and_corrupt_files() {
+        let volume = TempDir::new().unwrap();
+        create_valid_fixture(volume.path());
+        assert!(
+            matches!(preview_capture_image_path(volume.path(), "sess-001", "cap-1"),
+            CapturePreviewResult::Err { error } if error.category == "invalid_request")
+        );
+        create_png_fixture(volume.path());
+        for (session, capture) in [
+            ("../sess-001", "cap-1"),
+            ("sess-001", "../cap-1"),
+            ("sess-001", "missing"),
+        ] {
+            assert!(
+                matches!(preview_capture_image_path(volume.path(), session, capture),
+                CapturePreviewResult::Err { error } if error.category == "invalid_request")
+            );
+        }
+        let path = volume
+            .path()
+            .join("FOLDSCAN/sessions/sess-001/captures/cap-1.png");
+        let mut changed = fs::read(&path).unwrap();
+        changed[45] ^= 1;
+        fs::write(&path, changed).unwrap();
+        assert!(
+            matches!(preview_capture_image_path(volume.path(), "sess-001", "cap-1"),
+            CapturePreviewResult::Err { error } if error.category == "checksum_mismatch")
+        );
+    }
+
+    #[test]
+    fn capture_preview_rejects_bad_png_even_when_manifest_hash_matches() {
+        let volume = TempDir::new().unwrap();
+        create_png_fixture(volume.path());
+        let path = volume
+            .path()
+            .join("FOLDSCAN/sessions/sess-001/captures/cap-1.png");
+        let mut bad = fs::read(&path).unwrap();
+        bad[45] ^= 1;
+        fs::write(path, &bad).unwrap();
+        let manifest_path = volume
+            .path()
+            .join("FOLDSCAN/sessions/sess-001/session.json");
+        let mut session: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        session["captures"][0]["sha256"] = serde_json::json!(sha256_hex(&bad));
+        fs::write(manifest_path, serde_json::to_vec(&session).unwrap()).unwrap();
+        let result = preview_capture_image_path(volume.path(), "sess-001", "cap-1");
+        assert!(
+            matches!(result, CapturePreviewResult::Err { .. }),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_preview_refuses_symlinked_source() {
+        let volume = TempDir::new().unwrap();
+        create_png_fixture(volume.path());
+        let source = volume
+            .path()
+            .join("FOLDSCAN/sessions/sess-001/captures/cap-1.png");
+        let other = volume.path().join("other.png");
+        fs::rename(&source, &other).unwrap();
+        std::os::unix::fs::symlink(&other, source).unwrap();
+        assert!(matches!(
+            preview_capture_image_path(volume.path(), "sess-001", "cap-1"),
+            CapturePreviewResult::Err { .. }
+        ));
     }
 
     #[test]

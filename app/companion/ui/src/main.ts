@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { exportCommands } from "./exportMode";
+import { renderCapturePreview, type CapturePreviewResult } from "./capturePreview";
 import { renderOcrReview, type OcrReviewResult } from "./reviewOcr";
 
 import {
@@ -102,6 +103,49 @@ let ocrGeneration = 0;
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
 let currentVolumePath = "";
+let imagePreviewGeneration = 0;
+let imagePreviewBusy = false;
+const imagePreviewStatus = document.getElementById("image-preview-status");
+const imagePreviewResults = document.getElementById("image-preview-results");
+
+function clearImagePreview(): void {
+  imagePreviewGeneration += 1;
+  imagePreviewResults?.replaceChildren();
+  if (imagePreviewStatus) {
+    imagePreviewStatus.textContent = "Choose Preview image for a grayscale PNG capture.";
+  }
+}
+
+async function previewCaptureImage(sessionId: string, captureId: string): Promise<void> {
+  if (imagePreviewBusy || !currentVolumePath || !imagePreviewStatus || !imagePreviewResults) {
+    return;
+  }
+  clearImagePreview();
+  const generation = imagePreviewGeneration;
+  imagePreviewBusy = true;
+  imagePreviewStatus.textContent = `Verifying image for session ${sessionId}, capture ${captureId} locally…`;
+  try {
+    const result = await invoke<CapturePreviewResult>("preview_capture_image", {
+      volumePath: currentVolumePath,
+      sessionId,
+      captureId,
+    });
+    if (generation !== imagePreviewGeneration) {
+      return;
+    }
+    const displayed = renderCapturePreview(imagePreviewResults, sessionId, captureId, result);
+    imagePreviewStatus.textContent = displayed
+      ? "Image preview ready. Source files were not modified."
+      : "Image preview unavailable.";
+  } catch (error) {
+    if (generation === imagePreviewGeneration) {
+      const reason = error instanceof Error ? error.message : String(error);
+      imagePreviewStatus.textContent = `Image preview command unavailable: ${reason}`;
+    }
+  } finally {
+    imagePreviewBusy = false;
+  }
+}
 // Only this in-memory review session owns the choice; no filesystem persistence.
 const pdfSelections = new Map<string, boolean>();
 
@@ -207,6 +251,7 @@ function renderReviewPlan(): void {
           index === session.active.length - 1,
         ),
         createActionButton("Remove", "remove", session.sessionId, capture.captureId),
+        createActionButton(`Preview image for ${capture.captureId}`, "preview-image", session.sessionId, capture.captureId),
       );
       item.append(controls);
       activeList.append(item);
@@ -461,6 +506,7 @@ function clearImportDetails(): void {
   currentPlan = null;
   currentVolumePath = "";
   pdfSelections.clear();
+  clearImagePreview();
   if (importResults) {
     importResults.replaceChildren();
   }
@@ -485,6 +531,7 @@ function renderImportResult(result: ImportResult): void {
   const summary = result.summary;
   currentSummary = summary;
   currentPlan = createReviewPlan(summary);
+  clearImagePreview();
   clearExportPreview();
   if (exportPreviewStatus) {
     exportPreviewStatus.textContent =
@@ -682,6 +729,9 @@ if (reviewPlanElement) {
     }
 
     switch (action) {
+      case "preview-image":
+        if (captureId) void previewCaptureImage(sessionId, captureId);
+        return;
       case "preview-export":
         void previewExport(sessionId);
         return;
