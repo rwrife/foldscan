@@ -99,12 +99,12 @@ const ocrChooseFolder = document.getElementById("ocr-choose-folder");
 const ocrStatus = document.getElementById("ocr-status");
 const ocrResults = document.getElementById("ocr-results");
 let ocrGeneration = 0;
+let importGeneration = 0;
 
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
 let currentVolumePath = "";
 let imagePreviewGeneration = 0;
-let imagePreviewBusy = false;
 const imagePreviewStatus = document.getElementById("image-preview-status");
 const imagePreviewResults = document.getElementById("image-preview-results");
 
@@ -117,12 +117,11 @@ function clearImagePreview(): void {
 }
 
 async function previewCaptureImage(sessionId: string, captureId: string): Promise<void> {
-  if (imagePreviewBusy || !currentVolumePath || !imagePreviewStatus || !imagePreviewResults) {
+  if (!currentVolumePath || !imagePreviewStatus || !imagePreviewResults) {
     return;
   }
   clearImagePreview();
   const generation = imagePreviewGeneration;
-  imagePreviewBusy = true;
   imagePreviewStatus.textContent = `Verifying image for session ${sessionId}, capture ${captureId} locally…`;
   try {
     const result = await invoke<CapturePreviewResult>("preview_capture_image", {
@@ -137,13 +136,18 @@ async function previewCaptureImage(sessionId: string, captureId: string): Promis
     imagePreviewStatus.textContent = displayed
       ? "Image preview ready. Source files were not modified."
       : "Image preview unavailable.";
+    if (displayed) {
+      imagePreviewResults.querySelector("img")?.addEventListener("error", () => {
+        if (generation === imagePreviewGeneration) {
+          imagePreviewStatus.textContent = "Image could not be displayed.";
+        }
+      }, { once: true });
+    }
   } catch (error) {
     if (generation === imagePreviewGeneration) {
       const reason = error instanceof Error ? error.message : String(error);
       imagePreviewStatus.textContent = `Image preview command unavailable: ${reason}`;
     }
-  } finally {
-    imagePreviewBusy = false;
   }
 }
 // Only this in-memory review session owns the choice; no filesystem persistence.
@@ -531,7 +535,6 @@ function renderImportResult(result: ImportResult): void {
   const summary = result.summary;
   currentSummary = summary;
   currentPlan = createReviewPlan(summary);
-  clearImagePreview();
   clearExportPreview();
   if (exportPreviewStatus) {
     exportPreviewStatus.textContent =
@@ -579,16 +582,19 @@ async function probeImport(path: string): Promise<void> {
     return;
   }
 
+  const generation = ++importGeneration;
   importStatus.textContent = "Checking the selected removable-media path…";
   importResults.replaceChildren();
   clearImportDetails();
-  currentVolumePath = path;
   try {
     const result = await invoke<ImportResult>("import_volume_summary", {
       volumePath: path,
     });
+    if (generation !== importGeneration) return;
+    if (result.status === "ok") currentVolumePath = path;
     renderImportResult(result);
   } catch (error) {
+    if (generation !== importGeneration) return;
     clearImportDetails();
     const reason = error instanceof Error ? error.message : String(error);
     importStatus.textContent = `Import command unavailable: ${reason}`;
@@ -766,6 +772,7 @@ if (reviewPlanElement) {
         return;
     }
 
+    clearImagePreview();
     clearExportPreview();
     if (exportPreviewStatus) {
       exportPreviewStatus.textContent =
