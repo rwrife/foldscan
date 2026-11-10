@@ -63,7 +63,12 @@ export function renderCapturePreview(
       image.width = p.width_px;
       image.height = p.height_px;
       image.src = p.data_uri;
-      image.addEventListener("error", () => { root.replaceChildren(); message.textContent = "Image could not be displayed."; root.append(message); }, { once: true });
+      image.addEventListener("error", () => {
+        if (!root.contains(image)) return;
+        root.replaceChildren();
+        message.textContent = "Image could not be displayed.";
+        root.append(message);
+      }, { once: true });
       root.append(message, image);
       return true;
     }
