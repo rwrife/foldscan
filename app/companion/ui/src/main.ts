@@ -100,6 +100,17 @@ const ocrStatus = document.getElementById("ocr-status");
 const ocrResults = document.getElementById("ocr-results");
 let ocrGeneration = 0;
 let importGeneration = 0;
+let exportPreviewGeneration = 0;
+let exportPickerGeneration = 0;
+let pickingExport = false;
+
+function invalidateExportPicker(): void {
+  exportPickerGeneration += 1;
+  if (pickingExport) {
+    pickingExport = false;
+    if (exportStatus) exportStatus.textContent = "Review changed. Choose Export again; no export was started.";
+  }
+}
 
 let currentSummary: ImportSummary | null = null;
 let currentPlan: ReviewPlan | null = null;
@@ -301,6 +312,7 @@ function renderReviewPlan(): void {
     pdfCheckbox.checked = pdfSelections.get(session.sessionId) ?? false;
     pdfCheckbox.addEventListener("change", () => {
       pdfSelections.set(session.sessionId, pdfCheckbox.checked);
+      invalidateExportPicker();
       clearExportPreview();
     });
     pdfLabel.append(pdfCheckbox, " Include ordered PDF (8-bit grayscale PNG captures only)");
@@ -327,6 +339,7 @@ function renderReviewPlan(): void {
 }
 
 function clearExportPreview(): void {
+  exportPreviewGeneration += 1;
   if (exportPreviewStatus) {
     exportPreviewStatus.textContent =
       "Run an import check, then preview a session's export layout.";
@@ -391,8 +404,9 @@ async function previewExport(sessionId: string): Promise<void> {
     return;
   }
 
+  clearExportPreview();
+  const generation = exportPreviewGeneration;
   exportPreviewStatus.textContent = `Previewing canonical export layout for session ${sessionId}…`;
-  exportPreviewResults.replaceChildren();
 
   const req = createExportPreviewRequest(currentVolumePath, session);
   try {
@@ -401,8 +415,14 @@ async function previewExport(sessionId: string): Promise<void> {
       sessionId: req.sessionId,
       captureIds: req.captureIds,
     });
+    if (generation !== exportPreviewGeneration) {
+      return;
+    }
     renderExportPreview(result);
   } catch (error) {
+    if (generation !== exportPreviewGeneration) {
+      return;
+    }
     const reason = error instanceof Error ? error.message : String(error);
     exportPreviewStatus.textContent = `Export preview command unavailable: ${reason}`;
   }
@@ -469,6 +489,9 @@ async function exportSessionToFolder(sessionId: string): Promise<void> {
   }
 
   const pdf = wantsPdf(sessionId);
+  invalidateExportPicker();
+  const generation = exportPickerGeneration;
+  pickingExport = true;
   exportStatus.textContent = "Opening the system destination folder picker…";
   exportResults.replaceChildren();
   let destinationPath: string;
@@ -478,12 +501,20 @@ async function exportSessionToFolder(sessionId: string): Promise<void> {
       multiple: false,
       title: `Choose the destination folder for session ${sessionId}`,
     });
+    if (generation !== exportPickerGeneration) {
+      return;
+    }
+    pickingExport = false;
     if (selected === null) {
       exportStatus.textContent = "Export cancelled. Nothing was written.";
       return;
     }
     destinationPath = selected;
   } catch (error) {
+    if (generation !== exportPickerGeneration) {
+      return;
+    }
+    pickingExport = false;
     const reason = error instanceof Error ? error.message : String(error);
     exportStatus.textContent = `Folder picker unavailable: ${reason}`;
     return;
@@ -506,6 +537,8 @@ async function exportSessionToFolder(sessionId: string): Promise<void> {
 }
 
 function clearImportDetails(): void {
+  const hadPicker = pickingExport;
+  invalidateExportPicker();
   currentSummary = null;
   currentPlan = null;
   currentVolumePath = "";
@@ -516,6 +549,9 @@ function clearImportDetails(): void {
   }
   clearExportPreview();
   clearExportExecution();
+  if (hadPicker && exportStatus) {
+    exportStatus.textContent = "Import cleared. Choose Export again; no export was started.";
+  }
   renderReviewPlan();
 }
 
@@ -748,24 +784,28 @@ if (reviewPlanElement) {
         if (!captureId) {
           return;
         }
+        invalidateExportPicker();
         currentPlan = moveCapture(currentPlan, sessionId, captureId, -1);
         break;
       case "move-down":
         if (!captureId) {
           return;
         }
+        invalidateExportPicker();
         currentPlan = moveCapture(currentPlan, sessionId, captureId, 1);
         break;
       case "remove":
         if (!captureId) {
           return;
         }
+        invalidateExportPicker();
         currentPlan = removeCapture(currentPlan, sessionId, captureId);
         break;
       case "restore":
         if (!captureId) {
           return;
         }
+        invalidateExportPicker();
         currentPlan = restoreCapture(currentPlan, sessionId, captureId);
         break;
       default:
